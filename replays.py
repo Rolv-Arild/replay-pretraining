@@ -1,61 +1,19 @@
-import glob
 import json
 import os
-import pickle
-import re
 from collections import namedtuple
-from concurrent.futures import ProcessPoolExecutor
 
 import pandas as pd
-from typing import Iterator, Tuple
 
 import numpy as np
 import torch
 from rlgym.utils.common_values import BOOST_LOCATIONS, BALL_RADIUS
 from rlgym.utils.gamestates import GameState
-from rlgym.utils.obs_builders import AdvancedObs
 
-from main import get_data, rolling_window, make_lookup_table, normalize_quadrant, mirror_map, LIN_NORM, ANG_NORM
+from behavioral_cloning import make_bc_dataset
+from util import get_data, rolling_window, make_lookup_table, normalize_quadrant, mirror_map, LIN_NORM, ANG_NORM, \
+    quats_to_rot_mtx
 
 Replay = namedtuple("Replay", "metadata analyzer ball game players")
-
-
-def quats_to_rot_mtx(quats: np.ndarray) -> np.ndarray:
-    # From rlgym.utils.math.quat_to_rot_mtx
-    w = -quats[:, 0]
-    x = -quats[:, 1]
-    y = -quats[:, 2]
-    z = -quats[:, 3]
-
-    theta = np.zeros((quats.shape[0], 3, 3))
-
-    norm = np.einsum("fq,fq->f", quats, quats)
-
-    sel = norm != 0
-
-    w = w[sel]
-    x = x[sel]
-    y = y[sel]
-    z = z[sel]
-
-    s = 1.0 / norm[sel]
-
-    # front direction
-    theta[sel, 0, 0] = 1.0 - 2.0 * s * (y * y + z * z)
-    theta[sel, 1, 0] = 2.0 * s * (x * y + z * w)
-    theta[sel, 2, 0] = 2.0 * s * (x * z - y * w)
-
-    # left direction
-    theta[sel, 0, 1] = 2.0 * s * (x * y - z * w)
-    theta[sel, 1, 1] = 1.0 - 2.0 * s * (x * x + z * z)
-    theta[sel, 2, 1] = 2.0 * s * (y * z + x * w)
-
-    # up direction
-    theta[sel, 0, 2] = 2.0 * s * (x * z + y * w)
-    theta[sel, 1, 2] = 2.0 * s * (y * z - x * w)
-    theta[sel, 2, 2] = 1.0 - 2.0 * s * (x * x + y * y)
-
-    return theta
 
 
 def get_data_df(df: pd.DataFrame, actions: np.ndarray):
@@ -285,69 +243,6 @@ def label_replay(parsed_replay: Replay):
             yield zip(states, actions)
 
 
-def make_dataset(input_folder, output_folder, shard_size=30 * 60 * 60):
-    train = [[], [], 0, "train"]
-    validation = [[], [], 0, "validation"]
-    test = [[], [], 0, "test"]
-    n_players = None
-    for replay_path in sorted(glob.glob(f"{input_folder}/**/__game.parquet", recursive=True),
-                              key=lambda p: os.path.basename(os.path.dirname(p))):
-        replay_path = os.path.dirname(replay_path)
-        replay_id = os.path.basename(replay_path)
-
-        s = sum(int(d, 16) for d in replay_id.replace("-", ""))
-        if s % 100 < 90:
-            arrs = train
-        elif s % 100 < 95:
-            arrs = validation
-        else:
-            arrs = test
-
-        try:
-            parsed_replay = load_parsed_replay(replay_path)
-        except Exception as e:
-            print("Error in replay", replay_id, e)
-            continue
-        if n_players is None:
-            n_players = len(parsed_replay.metadata["players"])
-        elif len(parsed_replay.metadata["players"]) != n_players or n_players % 2 != 0:
-            continue
-        prev_actions = np.zeros((n_players, 8))
-        obs_builders = [AdvancedObs() for _ in range(n_players)]
-        x_data, y_data = arrs[:2]
-        for episode in label_replay(parsed_replay):
-            for i, (state, action) in enumerate(episode):
-                for j, (player, obs_builder, act) in enumerate(zip(state.players, obs_builders, action)):
-                    if i == 0:
-                        obs_builder.reset(state)
-                    obs = obs_builder.build_obs(player, state, prev_actions[j])
-                    x_data.append(obs)
-                    y_data.append(act)
-                    arrs[2] += 1
-                    if isinstance(act, int):
-                        prev_actions[j] = lut[act]
-                    else:
-                        prev_actions[j] = act
-        if arrs[2] > shard_size:
-            x_data = np.stack(x_data)
-            y_data = np.stack(y_data)
-            split = arrs[3]
-            split_shards = sum(split in file for file in os.listdir(output_folder))
-            np.savez_compressed(os.path.join(output_folder, f"{split}-shard-{split_shards}.npz"),
-                                x_data=x_data, y_data=y_data)
-            arrs[:3] = [], [], 0
-        print(replay_id)
-    for arrs in train, validation, test:
-        x_data, y_data = arrs[:2]
-        x_data = np.stack(x_data)
-        y_data = np.stack(y_data)
-        split = arrs[3]
-        split_shards = sum(split in file for file in os.listdir(output_folder))
-        np.savez_compressed(os.path.join(output_folder, f"{split}-shard-{split_shards}.npz"),
-                            x_data=x_data, y_data=y_data)
-        arrs[:3] = [], [], 0
-
-
 def manual_validate():
     replay_path = r"D:\rokutleg\parsed\2021-electrum-replays\ranked-doubles\gold\00a43335-dfb0-49ca-ab48-aa2f16a38d9c.replay\00a43335-dfb0-49ca-ab48-aa2f16a38d9c"
     parsed_replay = load_parsed_replay(replay_path)
@@ -393,5 +288,5 @@ if __name__ == '__main__':
     model = torch.jit.load("idm-model.pt").cuda()
     # manual_validate()
 
-    make_dataset(r"D:\rokutleg\parsed\2021-electrum-replays\ranked-doubles",
+    make_bc_dataset(r"D:\rokutleg\parsed\2021-electrum-replays\ranked-doubles",
                  r"D:\rokutleg\electrum-dataset")

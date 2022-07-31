@@ -11,7 +11,7 @@ from rlgym.utils.obs_builders import AdvancedObs
 from rlgym.utils.state_setters import RandomState
 from rlgym.utils.terminal_conditions.common_conditions import TimeoutCondition, GoalScoredCondition
 
-from main import lookup_table
+from util import lookup_table
 
 boost_locations = np.array(BOOST_LOCATIONS)
 
