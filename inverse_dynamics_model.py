@@ -70,7 +70,8 @@ class IDMDataset(IterableDataset):
                 indices = np.random.permutation(len(features)) if self.key == "train" else np.arange(len(features))
                 for b in range(0, len(indices), 1800):
                     i = indices[b:b + 1800]
-                    yield features[i], tuple(labels[j][i] for j in range(len(labels)))
+                    if len(i) == 1800 or self.key != 'train':
+                        yield features[i], tuple(labels[j][i] for j in range(len(labels)))
             else:
                 break
             n += 1
@@ -139,6 +140,8 @@ def train_idm():
     min_loss = float("inf")
 
     n = 0
+    tot_losses = {k: 0 for k in output_names}
+    t = 0
     for epoch in range(100):
         model.train()
         train_loader = DataLoader(train_dataset, 5, collate_fn=collate)
@@ -146,21 +149,27 @@ def train_idm():
             y_hat = model(x_train.cuda())
             losses = {}
             for i, name in enumerate(output_names):
-                losses[name] = loss_fn(y_hat[i].squeeze(), y_train[i].cuda())
+                f = loss_fn(y_hat[i].squeeze(), y_train[i].cuda())
+                losses[name] = f
+                tot_losses += f.item()
+                t += 1
             loss = sum(losses.values())
+            validate = (n + 1) % (12 * 24) == 0
             if n % 12 == 0:
                 logger.log({"epoch": epoch}, commit=False)
-                logger.log({"train/step": n * 1800 * 5}, commit=False)
-                logger.log({"train/total_loss": loss.item()}, commit=False)
-                logger.log({f"train/{k}_loss": v.item() for k, v in losses.items()})
-                print(f"Hour {n // 12}:", loss.item(), {k: v.item() for k, v in losses.items()})
+                logger.log({"train/samples": n * 1800 * 5}, commit=False)
+                tot_loss = sum(tot_losses.values()) / t
+                logger.log({"train/total_loss": tot_loss}, commit=False)
+                logger.log({f"train/{k}_loss": v / t for k, v in tot_losses.items()}, commit=not validate)
+                print(f"Hour {n // 12}:", tot_loss, {k: v.item() / t for k, v in tot_losses.items()})
+                t = 0
 
             loss.backward()
             optimizer.step()
             model.zero_grad(True)
             n += 1
 
-            if n % (12 * 24) == 0:
+            if validate:
                 print("Validating...")
                 with torch.no_grad():
                     model.eval()
@@ -174,7 +183,6 @@ def train_idm():
                         m += 1
                     tot_loss = sum(losses.values()).item() / m
                     logger.log({"epoch": epoch}, commit=False)
-                    logger.log({"validation/step": n * 1800 * 5}, commit=False)
                     logger.log({"validation/total_loss": tot_loss}, commit=False)
                     logger.log({f"validation/{k}_loss": v.item() / m for k, v in losses.items()})
                     print(f"Day {n // (12 * 24)}:", tot_loss, {k: v.item() / m for k, v in losses.items()})

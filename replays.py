@@ -9,11 +9,8 @@ import torch
 from rlgym.utils.common_values import BOOST_LOCATIONS, BALL_RADIUS
 from rlgym.utils.gamestates import GameState
 
-from behavioral_cloning import make_bc_dataset
 from util import get_data, rolling_window, make_lookup_table, normalize_quadrant, mirror_map, LIN_NORM, ANG_NORM, \
-    quats_to_rot_mtx
-
-Replay = namedtuple("Replay", "metadata analyzer ball game players")
+    quats_to_rot_mtx, idm_model, Replay
 
 
 def get_data_df(df: pd.DataFrame, actions: np.ndarray):
@@ -229,7 +226,7 @@ def label_replay(parsed_replay: Replay):
                 inp = torch.from_numpy(x_rolled).float().cuda()
                 y_hat = [0.] * 4
                 for _ in range(40):
-                    t = model(inp)
+                    t = idm_model(inp)
                     for j in range(4):
                         y_hat[j] += t[j]
                 pred_actions, pred_on_ground, pred_has_jump, pred_has_flip = (t.argmax(axis=-1).cpu().numpy()
@@ -274,7 +271,7 @@ def manual_validate():
     players = sorted(parsed_replay.metadata["players"], key=lambda x: int(x["unique_id"]))
     df = pd.concat(dfs)
     action_indices = np.concatenate([a for s, a in data]).astype(int)
-    actions = lut[action_indices, :]
+    actions = lookup_table[action_indices, :]
     df[[f"{player['unique_id']}/action_index" for player in players]] = action_indices
     buttons = "THROTTLE, STEER, PITCH, YAW, ROLL, JUMP, BOOSTING, HANDBRAKE".lower().split(", ")
     df[[f"{player['unique_id']}/action_{button}" for player in players for button in
@@ -284,9 +281,9 @@ def manual_validate():
 
 
 if __name__ == '__main__':
-    lut = make_lookup_table()
+    lookup_table = make_lookup_table()
     model = torch.jit.load("idm-model.pt").cuda()
     # manual_validate()
 
-    make_bc_dataset(r"D:\rokutleg\parsed\2021-electrum-replays\ranked-doubles",
-                 r"D:\rokutleg\electrum-dataset")
+    # make_bc_dataset(r"D:\rokutleg\parsed\2021-electrum-replays\ranked-doubles",
+    #              r"D:\rokutleg\electrum-dataset")

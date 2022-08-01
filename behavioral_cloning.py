@@ -12,7 +12,8 @@ from torch.nn import functional as F
 from torch.utils.data import IterableDataset, DataLoader
 from torch.utils.data.dataset import T_co
 
-from replays import load_parsed_replay, label_replay, lut
+from util import lookup_table
+from replays import load_parsed_replay, label_replay
 
 
 def make_bc_dataset(input_folder, output_folder, shard_size=30 * 60 * 60):
@@ -43,21 +44,23 @@ def make_bc_dataset(input_folder, output_folder, shard_size=30 * 60 * 60):
         elif len(parsed_replay.metadata["players"]) != n_players or n_players % 2 != 0:
             continue
         prev_actions = np.zeros((n_players, 8))
-        obs_builders = [AdvancedObs() for _ in range(n_players)]
+        obs_builder = AdvancedObs()
         x_data, y_data = arrs[:2]
         for episode in label_replay(parsed_replay):
             for i, (state, action) in enumerate(episode):
-                for j, (player, obs_builder, act) in enumerate(zip(state.players, obs_builders, action)):
-                    if i == 0:
-                        obs_builder.reset(state)
+                if i == 0:
+                    obs_builder.reset(state)
+                    if (action == 8).all():
+                        continue
+                for j, (player, act) in enumerate(zip(state.players, action)):
                     obs = obs_builder.build_obs(player, state, prev_actions[j])
                     x_data.append(obs)
                     y_data.append(act)
                     arrs[2] += 1
-                    if isinstance(act, int):
-                        prev_actions[j] = lut[act]
-                    else:
+                    if act.shape == (8,):
                         prev_actions[j] = act
+                    else:
+                        prev_actions[j] = lookup_table[act.astype(int)]
         if arrs[2] > shard_size:
             x_data = np.stack(x_data)
             y_data = np.stack(y_data)
@@ -92,14 +95,15 @@ class BCDataset(IterableDataset):
             if os.path.isfile(path):
                 f = np.load(path)
                 x_data = f["x_data"]
-                mask = ~np.isnan(x_data).any(axis=-1)
+                mask = ~np.isnan(x_data).any(axis=-1)  # & (x_data[:, 1] == 0)
                 x_data = x_data[mask]
                 y_data = f["y_data"][mask]
-                assert mask.mean() > 0.5
+                # assert mask.mean() > 0.5
                 indices = np.random.permutation(len(x_data)) if self.key == "train" else np.arange(len(x_data))
                 for b in range(0, len(indices), 1800):
                     i = indices[b:b + 1800]
-                    yield x_data[i], y_data[i]
+                    if len(i) == 1800 or self.key != 'train':
+                        yield x_data[i], y_data[i]
             else:
                 break
             n += 1
@@ -130,7 +134,7 @@ class BCNet(nn.Module):
 def train_bc():
     assert torch.cuda.is_available()
     train_dataset = BCDataset(r"D:\rokutleg\electrum-dataset", "train")
-    val_dataset = BCDataset(r"D:\rokutleg\electrum-dataset", "validation", limit=4)
+    val_dataset = BCDataset(r"D:\rokutleg\electrum-dataset", "validation")
 
     ff_dim = 2048
     dropout_rate = 0.
@@ -167,10 +171,11 @@ def train_bc():
             loss = loss_fn(y_hat, y_train.cuda())
             tot_loss += loss.item()
             k += 1
+            validate = (n + 1) % (12 * 24) == 0
             if n % 12 == 0:
                 logger.log({"epoch": epoch}, commit=False)
-                logger.log({"train/step": n * 1800 * 5}, commit=False)
-                logger.log({"train/loss": tot_loss / k})
+                logger.log({"train/samples": n * 1800 * 5}, commit=False)
+                logger.log({"train/loss": tot_loss / k}, commit=not validate)
                 print(f"Hour {n // 12}:", tot_loss / k)
                 tot_loss = k = 0
 
@@ -179,7 +184,7 @@ def train_bc():
             model.zero_grad(True)
             n += 1
 
-            if n % (12 * 24) == 0:
+            if validate:
                 print("Validating...")
                 with torch.no_grad():
                     model.eval()
@@ -188,13 +193,12 @@ def train_bc():
                     loss = 0
                     for x_val, y_val in val_loader:
                         y_hat = model(x_val.cuda())
-                        loss += loss_fn(y_hat, y_val.cuda())
+                        loss += loss_fn(y_hat, y_val.cuda()).item()
                         m += 1
                     loss /= m
                     logger.log({"epoch": epoch}, commit=False)
-                    logger.log({"validation/step": n * 1800 * 5}, commit=False)
-                    logger.log({"validation/loss": loss.item()})
-                    print(f"Day {n // (12 * 24)}:", loss.item())
+                    logger.log({"validation/loss": loss})
+                    print(f"Day {n // (12 * 24)}:", loss)
                     if loss < min_loss:
                         torch.jit.save(model, "bc-model.pt")
                         print(f"Model saved at day {n // (12 * 24)} with total validation loss {loss}")
@@ -202,7 +206,7 @@ def train_bc():
 
 
 def test_bc():
-    test_dataset = BCDataset(r"D:\rokutleg\electrum-dataset", "test")
+    test_dataset = BCDataset(r"D:\rokutleg\electrum-dataset-fixed", "test")
     model = torch.jit.load("bc-model.pt").cuda()
 
     def collate(batch):
@@ -223,3 +227,10 @@ def test_bc():
                 y_hat = model(x.cuda())
                 for j in range(len(x)):
                     f.write(f"{y_hat[j].argmax(axis=-1).item()},{y_true[j]}\n")
+
+
+if __name__ == '__main__':
+    make_bc_dataset(r"E:\rokutleg\parsed\2021-ssl-replays\ranked-doubles",
+                    r"D:\rokutleg\ssl-dataset")
+    # train_bc()
+    # test_bc()

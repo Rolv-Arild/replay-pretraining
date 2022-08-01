@@ -1,10 +1,13 @@
+import re
+from collections import namedtuple
 from typing import List
 
 import numpy as np
-from rlgym.utils.common_values import BALL_RADIUS
+import torch.jit
+from rlgym.utils.common_values import BALL_RADIUS, BLUE_TEAM
 from rlgym.utils.gamestates.game_state import GameState
 
-from behavioral_cloning import train_bc
+from replays import Replay
 
 
 def make_lookup_table():
@@ -166,3 +169,61 @@ def quats_to_rot_mtx(quats: np.ndarray) -> np.ndarray:
     theta[sel, 2, 2] = 1.0 - 2.0 * s * (x * x + y * y)
 
     return theta
+
+
+def encoded_states_to_advanced_obs(df, actions):
+    uids = [col.split("/")[0]
+            for col in df.columns
+            if not (col.startswith("ball") or col.startswith("invert")) and "pos_x" in col]
+    obs = np.zeros((len(uids), len(df), 51 + 25 * len(uids)))
+
+    pos_std = 2300
+    ang_std = np.pi
+
+    for i, uid in enumerate(uids):
+        def add_player(player_id, idx):
+            pos = df[[f"{invert}{player_id}/pos_{axis}" for axis in "xyz"]].values
+            vel = df[[f"{invert}{player_id}/vel_{axis}" for axis in "xyz"]].values
+            obs[i, :, idx:idx + 3] = (ball_pos - pos) / pos_std
+            obs[i, :, idx + 3:idx + 6] = (ball_vel - vel) / pos_std
+            obs[i, :, idx + 6:idx + 9] = pos / pos_std
+            rot = quats_to_rot_mtx(df[[f"{player_id}/quat_{axis}" for axis in "wxyz"]].values)
+            obs[i, :, idx + 9:idx + 12] = rot[:, :, 0]  # Forward
+            obs[i, :, idx + 12:idx + 15] = rot[:, :, 2]  # Up
+            obs[i, :, idx + 15:idx + 18] = vel / pos_std
+            obs[i, :, idx + 18:idx + 21] = df[[f"{invert}{player_id}/vel_{axis}" for axis in "xyz"]].values / ang_std
+            obs[i, :, idx + 21] = df[f"{player_id}/boost_amount"]
+            obs[i, :, idx + 22] = df[f"{player_id}/on_ground"]
+            obs[i, :, idx + 23] = df[f"{player_id}/has_flip"]
+            obs[i, :, idx + 24] = df[f"{player_id}/is_demoed"]
+
+        invert = "" if df[f"{uid}/team_num"][0] == BLUE_TEAM else "inverted_"
+
+        ball_pos = df[[f"{invert}ball/pos_{axis}" for axis in "xyz"]].values
+        ball_vel = df[[f"{invert}ball/vel_{axis}" for axis in "xyz"]].values
+        obs[i, :, 0:3] = ball_pos / pos_std
+        obs[i, :, 3:6] = ball_vel / pos_std
+        obs[i, :, 6:9] = df[[f"{invert}ball/ang_vel_{axis}" for axis in "xyz"]].values / ang_std
+        obs[i, :, 9:17] = lookup_table[actions[i].astype(int)]
+        obs[i, :, 17:51] = df[[f"pad_{34 - n if invert else n}" for n in range(34)]].values
+
+        index = 51
+        add_player(uid, index)
+        index += 25
+
+        teams = {puid: df[f"{puid}/team_num"][0] == df[f"{uid}/team_num"][0] for puid in uids}
+        for puid in sorted(uids, key=teams.get):
+            if puid == uid:
+                continue
+            add_player(puid, index)
+            obs[i, :, index:index + 3] = (df[[f"{invert}{puid}/pos_{axis}" for axis in "xyz"]].values
+                                          - df[[f"{invert}{uid}/pos_{axis}" for axis in "xyz"]].values)
+            obs[i, :, index + 3:index + 6] = (df[[f"{invert}{puid}/vel_{axis}" for axis in "xyz"]].values
+                                              - df[[f"{invert}{uid}/vel_{axis}" for axis in "xyz"]].values)
+            index += 25 + 9
+
+    return obs
+
+
+idm_model = torch.jit.load("idm-model-super-star-16.pt").to("cuda" if torch.cuda.is_available() else "cpu")
+Replay = namedtuple("Replay", "metadata analyzer ball game players")

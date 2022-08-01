@@ -47,7 +47,7 @@ class TimerObs(ObsBuilder):
         obs = [ball.position / self.POS_STD,
                ball.linear_velocity / self.POS_STD,
                ball.angular_velocity / self.ANG_STD,
-               np.zeros(8),  # previous_action,
+               previous_action,
                self.boost_timers]
 
         player_car = self._add_player_to_obs(obs, player, ball, inverted)
@@ -102,11 +102,13 @@ class TimerObs(ObsBuilder):
 
 
 if __name__ == '__main__':
+    ts = 4
     env = rlgym.make(game_speed=1, spawn_opponents=True, team_size=2,
-                     state_setter=RandomState(True, True, False),
-                     obs_builder=TimerObs(), terminal_conditions=[TimeoutCondition(120 * 60), GoalScoredCondition()],
-                     use_injector=True, tick_skip=1)
-    model = torch.jit.load("bc-model-glowing-jazz-31.pt").cpu()
+                     # state_setter=RandomState(True, True, False),
+                     obs_builder=TimerObs(),
+                     terminal_conditions=[TimeoutCondition(120 * 30 // ts), GoalScoredCondition()],
+                     use_injector=True, tick_skip=ts)
+    model = torch.jit.load("bc-model-jolly-star-48.pt").cpu()
     # model.eval()
 
     try:
@@ -116,10 +118,12 @@ if __name__ == '__main__':
                 done = False
                 while not done:
                     out = model(torch.from_numpy(np.stack(obs)).float())
-                    # actions = [np.random.choice(90, p=o.softmax(axis=-1).numpy()) for o in out]
-                    actions = out.argmax(axis=-1).numpy()
-                    actions = lookup_table[actions]
-                    for _ in range(4):
+                    action_indices = [np.random.choice(90, p=o.softmax(axis=-1).numpy()) for o in out]
+                    # action_indices = (out - 1000 * torch.eye(90)[8]).argmax(axis=-1).numpy()
+                    print(action_indices)
+                    # actions = [18] * 4
+                    actions = lookup_table[action_indices]
+                    for _ in range(4 // ts):
                         obs, reward, done, info = env.step(actions)
     finally:
         env.close()
