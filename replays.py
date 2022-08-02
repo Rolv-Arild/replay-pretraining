@@ -10,7 +10,7 @@ from rlgym.utils.common_values import BOOST_LOCATIONS, BALL_RADIUS
 from rlgym.utils.gamestates import GameState
 
 from util import get_data, rolling_window, make_lookup_table, normalize_quadrant, mirror_map, LIN_NORM, ANG_NORM, \
-    quats_to_rot_mtx, idm_model, Replay
+    quats_to_rot_mtx, idm_model, Replay, lookup_table
 
 
 def get_data_df(df: pd.DataFrame, actions: np.ndarray):
@@ -197,8 +197,8 @@ def to_rlgym_dfs(parsed_replay: Replay):
         end_frame = gameplay_period["goal_frame"]
         end_frame = df.index[-1] if end_frame is None else end_frame
 
-        yield (df.loc[start_frame:end_frame - 1],
-               controls_df[start_frame:end_frame])  # Actions are taken at t+1
+        yield (df.loc[start_frame:end_frame - 1].copy(),
+               controls_df[start_frame:end_frame].copy())  # Actions are taken at t+1
 
 
 def to_rlgym(df, controls_df=None):
@@ -217,38 +217,49 @@ def label_replay(parsed_replay: Replay):
     with torch.no_grad():
         it = to_rlgym_dfs(parsed_replay)
         for df, controls_df in it:
-            states = list(to_rlgym(df))
-            n_players = len(states[0].players)
-            actions = np.zeros((len(states), n_players))
+            # states = list(to_rlgym(df))
+            uids = sorted([col.split("/")[0]
+                           for col in df.columns
+                           if not (col.startswith("ball") or col.startswith("invert")) and "pos_x" in col])
+            n_players = len(uids)
+            actions = np.zeros((len(df), n_players))
             for i, (x, _) in enumerate(get_data_df(df, actions)):
                 x_rolled = x[rolling_window(np.arange(len(x)), 41, True, True)]
                 mirrored = normalize_quadrant(x_rolled, [np.zeros((len(x), n_players))])
                 inp = torch.from_numpy(x_rolled).float().cuda()
                 y_hat = [0.] * 4
-                for _ in range(40):
+                for _ in range(20):
                     t = idm_model(inp)
                     for j in range(4):
                         y_hat[j] += t[j]
-                pred_actions, pred_on_ground, pred_has_jump, pred_has_flip = (t.argmax(axis=-1).cpu().numpy()
-                                                                              for t in y_hat)
+
+                # Stack to make gpu->cpu transfer faster
+                pred_actions, pred_on_ground, pred_has_jump, pred_has_flip = torch.stack([t.argmax(axis=-1)
+                                                                                          for t in y_hat]).cpu().numpy()
+
                 pred_actions[mirrored] = mirror_map[pred_actions[mirrored]]
-                for j, state in enumerate(states):
-                    state.players[i].on_ground = pred_on_ground[j] == 1
-                    state.players[i].has_jump = pred_has_jump[j] == 1
-                    state.players[i].has_flip = pred_has_flip[j] == 1
+
+                uid = uids[i]
+                df[f"{uid}/on_ground"] = pred_on_ground == 1
+                df[f"{uid}/has_jump"] = pred_has_jump == 1
+                df[f"{uid}/has_flip"] = pred_has_flip == 1
+
+                # state.players[i].on_ground = pred_on_ground[j] == 1
+                # state.players[i].has_jump = pred_has_jump[j] == 1
+                # state.players[i].has_flip = pred_has_flip[j] == 1
                 actions[:, i] = pred_actions
-            yield zip(states, actions)
+            yield df, actions
 
 
 def manual_validate():
     replay_path = r"D:\rokutleg\parsed\2021-electrum-replays\ranked-doubles\gold\00a43335-dfb0-49ca-ab48-aa2f16a38d9c.replay\00a43335-dfb0-49ca-ab48-aa2f16a38d9c"
     parsed_replay = load_parsed_replay(replay_path)
-    list(label_replay(parsed_replay))
+    # list(label_replay(parsed_replay))
     it = to_rlgym_dfs(parsed_replay)
     data = []
     dfs = []
     with torch.no_grad():
-        # model.eval()
+        # idm_model.eval()
         for df, segment in it:
             states = list(to_rlgym(df))
             n_players = len(states[0].players)
@@ -259,7 +270,7 @@ def manual_validate():
                 inp = torch.from_numpy(x_rolled).float().cuda()
                 y_hat = [0.] * 4
                 for _ in range(40):
-                    t = model(inp)
+                    t = idm_model(inp)
                     for j in range(4):
                         y_hat[j] += t[j]
                 pred_actions, pred_on_ground, pred_has_jump, pred_has_flip = (t.argmax(axis=-1).cpu().numpy()
@@ -281,9 +292,9 @@ def manual_validate():
 
 
 if __name__ == '__main__':
-    lookup_table = make_lookup_table()
-    model = torch.jit.load("idm-model.pt").cuda()
-    # manual_validate()
+    # lookup_table = make_lookup_table()
+    # model = torch.jit.load("idm-model.pt").cuda()
+    manual_validate()
 
     # make_bc_dataset(r"D:\rokutleg\parsed\2021-electrum-replays\ranked-doubles",
     #              r"D:\rokutleg\electrum-dataset")

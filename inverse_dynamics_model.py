@@ -114,7 +114,7 @@ def train_idm():
     val_dataset = IDMDataset(r"D:\rokutleg\idm-dataset", "validation", limit=4)
 
     ff_dim = 2048
-    dropout_rate = 0.5
+    dropout_rate = 0.
     lr = 5e-5
 
     model = IDMNet(ff_dim, dropout_rate)
@@ -151,8 +151,9 @@ def train_idm():
             for i, name in enumerate(output_names):
                 f = loss_fn(y_hat[i].squeeze(), y_train[i].cuda())
                 losses[name] = f
-                tot_losses += f.item()
-                t += 1
+                tot_losses[name] += f.item()
+            t += 1
+
             loss = sum(losses.values())
             validate = (n + 1) % (12 * 24) == 0
             if n % 12 == 0:
@@ -161,8 +162,9 @@ def train_idm():
                 tot_loss = sum(tot_losses.values()) / t
                 logger.log({"train/total_loss": tot_loss}, commit=False)
                 logger.log({f"train/{k}_loss": v / t for k, v in tot_losses.items()}, commit=not validate)
-                print(f"Hour {n // 12}:", tot_loss, {k: v.item() / t for k, v in tot_losses.items()})
+                print(f"Hour {n // 12}:", tot_loss, {k: v / t for k, v in tot_losses.items()})
                 t = 0
+                tot_losses = {k: 0 for k in output_names}
 
             loss.backward()
             optimizer.step()
@@ -195,7 +197,7 @@ def train_idm():
 def test_idm():
     output_names = ["action", "on_ground", "has_jump", "has_flip"]
     test_dataset = IDMDataset(r"D:\rokutleg\idm-dataset", "test")
-    model = torch.jit.load("idm-model.pt").cuda()
+    model = torch.jit.load("idm-model-super-star-16.pt").cuda()
 
     def collate(batch):
         x = []
@@ -207,15 +209,27 @@ def test_idm():
         return (torch.from_numpy(np.concatenate(x)).float(),
                 tuple(torch.from_numpy(np.concatenate(y[i])).long() for i in range(len(y))))
 
-    with open("idm-results.csv", "w") as f:
+    with open("idm-results-mc40.csv", "w") as f:
         f.write(",".join(f"{name}_{source}" for name in output_names for source in ("pred", "true")) + "\n")
         with torch.no_grad():
-            model.eval()
+            # model.eval()
             test_loader = DataLoader(test_dataset, 12, collate_fn=collate)
             for x, y_true in test_loader:
-                y_hat = model(x.cuda())
+                # y_hat = model(x.cuda())
+
+                y_hat = [0.] * 4
+                for _ in range(40):
+                    t = model(x.cuda())
+                    for j in range(4):
+                        y_hat[j] += t[j]
+
                 for j in range(len(x)):
                     s = ""
                     for i, name in enumerate(output_names):
                         s += f"{y_hat[i][j].argmax(axis=-1).item()},{y_true[i][j]},"
                     f.write(s[:-1] + "\n")
+
+
+if __name__ == '__main__':
+    train_idm()
+    # test_idm()

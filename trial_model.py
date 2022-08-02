@@ -48,7 +48,7 @@ class TimerObs(ObsBuilder):
                ball.linear_velocity / self.POS_STD,
                ball.angular_velocity / self.ANG_STD,
                previous_action,
-               self.boost_timers]
+               self.boost_timers / 10]
 
         player_car = self._add_player_to_obs(obs, player, ball, inverted)
 
