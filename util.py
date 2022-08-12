@@ -225,5 +225,5 @@ def encoded_states_to_advanced_obs(df, actions):
     yield from ((obs[i], actions[:, i]) for i in range(len(uids)))
 
 
-idm_model = torch.jit.load("idm-model-super-star-16.pt").to("cuda" if torch.cuda.is_available() else "cpu")
+idm_model = torch.jit.load("idm-model-avid-eon-86.pt").to("cuda" if torch.cuda.is_available() else "cpu")
 Replay = namedtuple("Replay", "metadata analyzer ball game players")

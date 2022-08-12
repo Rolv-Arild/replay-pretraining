@@ -1,9 +1,12 @@
 import os
+import zipfile
 from typing import Iterator
 
+import numba as numba
 import numpy as np
 import torch
 from rlgym.utils.gamestates import GameState
+from torch.optim.lr_scheduler import LambdaLR
 
 import wandb
 from torch import nn
@@ -19,23 +22,31 @@ def make_idm_dataset(in_folder, out_folder, shard_size=60 * 60 * 30):
     validation = [[], 0, "validation"]
     test = [[], 0, "test"]
     for file in os.listdir(in_folder):
-        path = os.path.join(in_folder, file)
-        f = np.load(path)
-        states = [GameState(arr.tolist()) for arr in f["states"]]
-        actions = f["actions"]
-
         s = sum(int(d) for d in file.replace(".npz", ""))
-        if s % 10 < 8:
+        if s % 100 < 90:
             arrs = train
-        elif s % 10 == 8:
+        elif s % 100 < 95:
             arrs = validation
         else:
             arrs = test
 
+        path = os.path.join(in_folder, file)
+        f = np.load(path)
+        states = f["states"]
+        demos_md = np.diff(states[:, 86::39], axis=0) > 0
+        demos_id = np.diff(states[:, 88::39], axis=0) > 0
+        indices = np.where((~demos_id & demos_md))[0]
+        pad = int(file.replace(".npz", "")) % 7 == 0
+        if len(indices) > 0:
+            states = states[:indices[0]]
+            pad = False
+        states = [GameState(arr.tolist()) for arr in states]
+        actions = f["actions"]
+
         for x, y in get_data(states, actions):
-            if len(x) < 41:
+            if not pad and len(x) < 41:
                 continue
-            window = rolling_window(np.arange(len(x)), 41)
+            window = rolling_window(np.arange(len(x)), 41, pad_start=pad, pad_end=pad)
             grouped_x = x[window]
             grouped_y = tuple(y[i][window[:, 20]] for i in range(len(y)))
             normalize_quadrant(grouped_x, grouped_y)
@@ -46,10 +57,28 @@ def make_idm_dataset(in_folder, out_folder, shard_size=60 * 60 * 30):
                 y_data = tuple(np.concatenate([gy[i] for gx, gy in arrs[0]])
                                for i in range(len(arrs[0][0][1])))
                 out_name = f"{arrs[2]}-shard-{arrs[1]}.npz"
-                print(f"{out_name} ({len(arrs[0])})")
+                print(f"{out_name} ({len(x_data)})")
                 np.savez_compressed(os.path.join(out_folder, out_name), features=x_data, labels=y_data)
                 arrs[1] += 1
                 arrs[0].clear()
+
+
+@numba.njit
+def corrupted_indices(k, n):
+    indices = np.zeros((k, n))
+    for j in range(k):
+        i = 0
+        while i < n:
+            r = np.random.random()
+            if r < 0.075:
+                repeats = 1
+            elif r < 0.7:
+                repeats = 2
+            else:
+                repeats = 3
+            indices[j, i:i + repeats] = i
+            i += repeats
+    return indices
 
 
 class IDMDataset(IterableDataset):
@@ -64,14 +93,33 @@ class IDMDataset(IterableDataset):
             file = f"{self.key}-shard-{n}.npz"
             path = os.path.join(self.folder, file)
             if os.path.isfile(path):
-                f = np.load(path)
-                features = f["features"]
-                labels = f["labels"]
-                indices = np.random.permutation(len(features)) if self.key == "train" else np.arange(len(features))
-                for b in range(0, len(indices), 1800):
-                    i = indices[b:b + 1800]
-                    if len(i) == 1800 or self.key != 'train':
-                        yield features[i], tuple(labels[j][i] for j in range(len(labels)))
+                try:
+                    f = np.load(path)
+                    features = f["features"]
+                    labels = f["labels"]
+                except zipfile.BadZipFile:
+                    n += 1
+                    continue
+
+                # mask = ~np.isnan(features).any(axis=(1, 2))  # & (x_data[:, 1] == 0)
+                #
+                # features = features[mask]
+                # labels = labels[:, mask]
+
+                indices = (np.random.permutation(features.shape[0]) if self.key == "train"
+                           else np.arange(features.shape[0]))
+
+                features = features[indices]
+                labels = labels[:, indices]
+
+                if self.key == "train":
+                    corrupt_mask = np.random.random(features.shape[0]) < 0.5
+                    feat_corr = features[corrupt_mask]
+                    ind = corrupted_indices(feat_corr.shape[0], feat_corr.shape[1]).astype(int)
+                    feat_corr = feat_corr[np.tile(np.arange(feat_corr.shape[0]), (feat_corr.shape[1], 1)).T, ind]
+                    features[corrupt_mask] = feat_corr
+
+                yield from zip(features, zip(*labels))
             else:
                 break
             n += 1
@@ -107,107 +155,125 @@ class IDMNet(nn.Module):
         )
 
 
+def collate(batch):
+    x = []
+    y = [[] for _ in range(4)]
+    for b in batch:
+        x.append(b[0])
+        for i in range(len(y)):
+            y[i].append(b[1][i])
+    return (torch.from_numpy(np.stack(x)).float(),
+            tuple(torch.from_numpy(np.stack(y[i])).long() for i in range(len(y))))
+
+
 def train_idm():
     assert torch.cuda.is_available()
     output_names = ["action", "on_ground", "has_jump", "has_flip"]
     train_dataset = IDMDataset(r"D:\rokutleg\idm-dataset", "train")
-    val_dataset = IDMDataset(r"D:\rokutleg\idm-dataset", "validation", limit=4)
+    val_dataset = IDMDataset(r"D:\rokutleg\idm-dataset", "validation", limit=10)
 
     ff_dim = 2048
     dropout_rate = 0.
     lr = 5e-5
+    batch_size = 300
 
     model = IDMNet(ff_dim, dropout_rate)
     print(model)
     model = torch.jit.trace(model, torch.zeros(10, 41, 45)).cuda()
     print(f"Model has {sum(p.numel() for p in model.parameters() if p.requires_grad)} parameters")
+
     optimizer = torch.optim.Adam(model.parameters(), lr)
     loss_fn = nn.CrossEntropyLoss()
+    scheduler = LambdaLR(optimizer, lr_lambda=lambda e: 1 / (0.5 * e + 1))
 
     logger = wandb.init(group="idm", project="replay-model", entity="rolv-arild",
-                        config=dict(ff_dim=ff_dim, dropout_rate=dropout_rate, lr=lr))
-
-    def collate(batch):
-        x = []
-        y = [[] for _ in range(4)]
-        for b in batch:
-            x.append(b[0])
-            for i in range(len(y)):
-                y[i].append(b[1][i])
-        return (torch.from_numpy(np.concatenate(x)).float(),
-                tuple(torch.from_numpy(np.concatenate(y[i])).long() for i in range(len(y))))
+                        config=dict(ff_dim=ff_dim, dropout_rate=dropout_rate, lr=lr, batch_size=batch_size,
+                                    optimizer=type(optimizer).__name__, lr_schedule=scheduler is not None))
 
     min_loss = float("inf")
 
+    steps_per_hour = 108000
+    assert steps_per_hour % batch_size == 0
+    train_log_rate = 1
+    val_log_rate = 24
+
     n = 0
-    tot_losses = {k: 0 for k in output_names}
-    t = 0
+
+    train_losses = {k: 0 for k in output_names}
+    train_inferences = 0
+    train_correct = {k: 0 for k in output_names}
+    train_samples = 0
     for epoch in range(100):
         model.train()
-        train_loader = DataLoader(train_dataset, 5, collate_fn=collate)
+        train_loader = DataLoader(train_dataset, batch_size, collate_fn=collate, drop_last=True)
         for x_train, y_train in train_loader:
-            y_hat = model(x_train.cuda())
-            losses = {}
-            for i, name in enumerate(output_names):
-                f = loss_fn(y_hat[i].squeeze(), y_train[i].cuda())
-                losses[name] = f
-                tot_losses[name] += f.item()
-            t += 1
+            total_samples = batch_size * n
 
-            loss = sum(losses.values())
-            validate = (n + 1) % (12 * 24) == 0
-            if n % 12 == 0:
+            if total_samples % (val_log_rate * steps_per_hour) == 0:
+                print("Validating...")
+                with torch.no_grad():
+                    model.eval()
+                    val_loader = DataLoader(val_dataset, 9000, collate_fn=collate)
+                    val_losses = {k: 0 for k in output_names}
+                    val_inferences = 0
+                    val_correct = {k: 0 for k in output_names}
+                    val_samples = 0
+                    for x_val, y_val in val_loader:
+                        y_hat = model(x_val.cuda())
+                        for i, name in enumerate(output_names):
+                            val_losses[name] += loss_fn(y_hat[i], y_val[i].cuda()).item()
+                            val_correct[name] += (y_hat[i].cpu().argmax(axis=-1) == y_val[i]).sum().item()
+                        val_samples += len(x_val)
+                        val_inferences += 1
+                    val_losses = {k: v / val_inferences for k, v in val_losses.items()}
+                    accuracies = {k: v / val_samples for k, v in val_correct.items()}
+                    loss = sum(val_losses.values())
+                    logger.log({"validation/loss": loss}, commit=False)
+                    logger.log({f"validation/{k}_loss": v for k, v in val_losses.items()}, commit=False)
+                    logger.log({f"validation/{k}_accuracy": v for k, v in accuracies.items()}, commit=False)
+                    print(f"Day {total_samples // (val_log_rate * steps_per_hour)}:", loss, val_losses)
+                    if loss < min_loss:
+                        torch.jit.save(model, f"idm-model-{logger.name}.pt")
+                        print(f"Model saved at day {total_samples // (val_log_rate * steps_per_hour)} "
+                              f"with total validation loss {loss}")
+                        min_loss = loss
+                model.train()
+
+            y_hat = model(x_train.cuda())
+            loss = 0
+            for i, name in enumerate(output_names):
+                l = loss_fn(y_hat[i], y_train[i].cuda())
+                loss += l
+                train_losses[name] += l.item()
+                train_correct[name] += (y_hat[i].cpu().argmax(axis=-1) == y_train[i]).sum().item()
+            train_inferences += 1
+            train_samples += len(x_train)
+            if total_samples % (train_log_rate * steps_per_hour) == 0:
+                train_losses = {k: v / train_inferences for k, v in train_losses.items()}
+
                 logger.log({"epoch": epoch}, commit=False)
-                logger.log({"train/samples": n * 1800 * 5}, commit=False)
-                tot_loss = sum(tot_losses.values()) / t
-                logger.log({"train/total_loss": tot_loss}, commit=False)
-                logger.log({f"train/{k}_loss": v / t for k, v in tot_losses.items()}, commit=not validate)
-                print(f"Hour {n // 12}:", tot_loss, {k: v / t for k, v in tot_losses.items()})
-                t = 0
-                tot_losses = {k: 0 for k in output_names}
+                logger.log({"train/samples": total_samples}, commit=False)
+                logger.log({"train/loss": sum(train_losses.values())}, commit=False)
+                logger.log({f"train/{k}_loss": v for k, v in train_losses.items()}, commit=False)
+                logger.log({f"train/{k}_accuracy": v / train_samples for k, v in train_correct.items()}, commit=False)
+                logger.log({"train/learning_rate": scheduler.get_last_lr()[0]})
+                print(f"Hour {total_samples // steps_per_hour}:", sum(train_losses.values()))
+                train_losses = {k: 0 for k in output_names}
+                train_inferences = 0
+                train_correct = {k: 0 for k in output_names}
+                train_samples = 0
 
             loss.backward()
             optimizer.step()
             model.zero_grad(True)
             n += 1
-
-            if validate:
-                print("Validating...")
-                with torch.no_grad():
-                    model.eval()
-                    val_loader = DataLoader(val_dataset, 12, collate_fn=collate)
-                    losses = {k: 0 for k in output_names}
-                    m = 0
-                    for x_val, y_val in val_loader:
-                        y_hat = model(x_val.cuda())
-                        for i, name in enumerate(output_names):
-                            losses[name] += loss_fn(y_hat[i].squeeze(), y_val[i].cuda())
-                        m += 1
-                    tot_loss = sum(losses.values()).item() / m
-                    logger.log({"epoch": epoch}, commit=False)
-                    logger.log({"validation/total_loss": tot_loss}, commit=False)
-                    logger.log({f"validation/{k}_loss": v.item() / m for k, v in losses.items()})
-                    print(f"Day {n // (12 * 24)}:", tot_loss, {k: v.item() / m for k, v in losses.items()})
-                    if tot_loss < min_loss:
-                        torch.jit.save(model, "idm-model.pt")
-                        print(f"Model saved at day {n // (12 * 24)} with total validation loss {tot_loss}")
-                        min_loss = tot_loss
+        scheduler.step()
 
 
 def test_idm():
     output_names = ["action", "on_ground", "has_jump", "has_flip"]
     test_dataset = IDMDataset(r"D:\rokutleg\idm-dataset", "test")
     model = torch.jit.load("idm-model-super-star-16.pt").cuda()
-
-    def collate(batch):
-        x = []
-        y = [[] for _ in range(4)]
-        for b in batch:
-            x.append(b[0])
-            for i in range(len(y)):
-                y[i].append(b[1][i])
-        return (torch.from_numpy(np.concatenate(x)).float(),
-                tuple(torch.from_numpy(np.concatenate(y[i])).long() for i in range(len(y))))
 
     with open("idm-results-mc40.csv", "w") as f:
         f.write(",".join(f"{name}_{source}" for name in output_names for source in ("pred", "true")) + "\n")
@@ -231,5 +297,6 @@ def test_idm():
 
 
 if __name__ == '__main__':
+    # make_idm_dataset(r"D:\rokutleg\necto-data", r"D:\rokutleg\idm-dataset")
     train_idm()
     # test_idm()

@@ -215,6 +215,7 @@ def to_rlgym(df, controls_df=None):
 
 def label_replay(parsed_replay: Replay):
     with torch.no_grad():
+        idm_model.eval()
         it = to_rlgym_dfs(parsed_replay)
         for df, controls_df in it:
             # states = list(to_rlgym(df))
@@ -228,7 +229,7 @@ def label_replay(parsed_replay: Replay):
                 mirrored = normalize_quadrant(x_rolled, [np.zeros((len(x), n_players))])
                 inp = torch.from_numpy(x_rolled).float().cuda()
                 y_hat = [0.] * 4
-                for _ in range(20):
+                for _ in range(1):
                     t = idm_model(inp)
                     for j in range(4):
                         y_hat[j] += t[j]

@@ -10,6 +10,7 @@ from rlgym.utils.gamestates import GameState, PlayerData, PhysicsObject
 from rlgym.utils.obs_builders import AdvancedObs
 from rlgym.utils.state_setters import RandomState
 from rlgym.utils.terminal_conditions.common_conditions import TimeoutCondition, GoalScoredCondition
+from torch.distributions import Categorical
 
 from util import lookup_table
 
@@ -26,29 +27,32 @@ class TimerObs(ObsBuilder):
         self.demo_timers = None
 
     def reset(self, initial_state: GameState):
-        self.boost_timers = np.zeros(34)  # TODO
+        self.boost_timers = np.zeros(34)
         self.demo_timers = {}  # TODO
+
+    def pre_step(self, state: GameState):
+        self.boost_timers = np.clip(self.boost_timers - ts / 120, 1 / 120, None)
+        self.boost_timers[state.boost_pads == 1] = 0
+        big = boost_locations[:, 2] > 71
+        picked_up = (self.boost_timers == 0) & (state.boost_pads == 0)
+        self.boost_timers[picked_up & big] = 10
+        self.boost_timers[picked_up & ~big] = 4
 
     def build_obs(self, player: PlayerData, state: GameState, previous_action: np.ndarray) -> Any:
         if player.team_num == common_values.ORANGE_TEAM:
             inverted = True
             ball = state.inverted_ball
-            pads = state.inverted_boost_pads
+            pads = self.boost_timers[::-1]
         else:
             inverted = False
             ball = state.ball
-            pads = state.boost_pads
-        self.boost_timers = np.clip(self.boost_timers - 1 / 120, 0, None)
-        big = boost_locations[:, 2] > 71
-        picked_up = (self.boost_timers == 0) & (pads == 0)
-        self.boost_timers[picked_up & big] = 10
-        self.boost_timers[picked_up & ~big] = 4
+            pads = self.boost_timers
 
         obs = [ball.position / self.POS_STD,
                ball.linear_velocity / self.POS_STD,
                ball.angular_velocity / self.ANG_STD,
                previous_action,
-               self.boost_timers / 10]
+               pads / 10]
 
         player_car = self._add_player_to_obs(obs, player, ball, inverted)
 
@@ -102,28 +106,41 @@ class TimerObs(ObsBuilder):
 
 
 if __name__ == '__main__':
-    ts = 4
+    ts = 1
     env = rlgym.make(game_speed=1, spawn_opponents=True, team_size=2,
                      # state_setter=RandomState(True, True, False),
                      obs_builder=TimerObs(),
-                     terminal_conditions=[TimeoutCondition(120 * 30 // ts), GoalScoredCondition()],
+                     terminal_conditions=[TimeoutCondition(120 * 5 * 60 // ts), GoalScoredCondition()],
                      use_injector=True, tick_skip=ts)
-    model = torch.jit.load("bc-model-jolly-star-48.pt").cpu()
-    # model.eval()
+
+    deterministic = False
+    m = 1
 
     try:
         with torch.no_grad():
             while True:
-                obs = env.reset()
+                model = torch.jit.load("bc-model-solar-dust-98.pt").cpu()
+                model.eval()
+                obs, info = env.reset(return_info=True)
                 done = False
                 while not done:
-                    out = model(torch.from_numpy(np.stack(obs)).float())
-                    action_indices = [np.random.choice(90, p=o.softmax(axis=-1).numpy()) for o in out]
-                    # action_indices = (out - 1000 * torch.eye(90)[8]).argmax(axis=-1).numpy()
-                    print(action_indices)
-                    # actions = [18] * 4
+                    out = m * model(torch.from_numpy(np.stack(obs)).float())
+
+                    state = info["state"]
+                    for i, player in enumerate(state.players):
+                        if (state.ball.linear_velocity < 1).all() and (player.car_data.linear_velocity < 1).all():
+                            out[i, 8] -= 1000
+
+                    dist = Categorical(logits=out)
+                    if deterministic:
+                        action_indices = out.argmax(axis=-1).numpy()
+                    else:
+                        action_indices = dist.sample().numpy()
+                    print(action_indices, dist.entropy().mean().item())
                     actions = lookup_table[action_indices]
                     for _ in range(4 // ts):
                         obs, reward, done, info = env.step(actions)
+                        if done:
+                            break
     finally:
         env.close()

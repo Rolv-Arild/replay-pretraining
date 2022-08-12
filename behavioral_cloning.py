@@ -1,19 +1,20 @@
 import glob
 import os
+import time
+import zipfile
 from typing import Iterator
 
 import numpy as np
 import torch
-from rlgym.utils.obs_builders import AdvancedObs
-
-import wandb
 from torch import nn
 from torch.nn import functional as F
+from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import IterableDataset, DataLoader
 from torch.utils.data.dataset import T_co
 
-from util import lookup_table, encoded_states_to_advanced_obs
+import wandb
 from replays import load_parsed_replay, label_replay
+from util import encoded_states_to_advanced_obs, lookup_table
 
 
 def make_bc_dataset(input_folder, output_folder, shard_size=30 * 60 * 60):
@@ -25,6 +26,8 @@ def make_bc_dataset(input_folder, output_folder, shard_size=30 * 60 * 60):
                               key=lambda p: os.path.basename(os.path.dirname(p))):
         replay_path = os.path.dirname(replay_path)
         replay_id = os.path.basename(replay_path)
+        if int(replay_id[0], 16) < 3:
+            continue
 
         s = sum(int(d, 16) for d in replay_id.replace("-", ""))
         if s % 100 < 90:
@@ -97,31 +100,50 @@ class BCDataset(IterableDataset):
 
     def __iter__(self) -> Iterator[T_co]:
         n = 0
-        remainder = None
         while True:
             file = f"{self.key}-shard-{n}.npz"
             path = os.path.join(self.folder, file)
             if os.path.isfile(path):
-                f = np.load(path)
-                x_data = f["x_data"]
-                mask = ~np.isnan(x_data).any(axis=-1)  # & (x_data[:, 1] == 0)
-                x_data = x_data[mask]
-                y_data = f["y_data"][mask]
+                try:
+                    f = np.load(path)
+                    x_data = f["x_data"]
+                    y_data = f["y_data"].astype(int)
 
-                if remainder is not None:
-                    x_data = np.concatenate((remainder[0], x_data))
-                    y_data = np.concatenate((remainder[1], y_data))
+                    mask = ~np.isnan(x_data).any(axis=-1)  # & (x_data[:, 1] == 0)
+
+                    # Kickoffs tend to contain no-op at the start, making the model stand still when put in-game
+                    mask &= ~((x_data[:, 0:2] == 0).all(axis=-1)  # Ball pos
+                              & (x_data[:, 66:68] == 0).all(axis=-1)  # Player vel
+                              & (lookup_table[y_data][:, 0] == 0))  # Action
+
+                    # Physics data in replays tends to repeat 2 or 3 times, we only want value when it updates
+                    # Players update independently, so let's only check data for the current player
+                    mask &= (np.diff(x_data[:, 57:72], axis=0, prepend=np.nan) != 0).any(axis=1)
+
+                    x_data = x_data[mask]
+                    y_data = y_data[mask]
+                except zipfile.BadZipFile:
+                    n += 1
+                    continue
 
                 indices = np.random.permutation(len(x_data)) if self.key == "train" else np.arange(len(x_data))
-                for b in range(0, len(indices), 1800):
-                    i = indices[b:b + 1800]
-                    if len(i) < 1800 and self.key == "train":
-                        remainder = x_data[i], y_data[i]
-                    else:
-                        yield x_data[i], y_data[i]
+
+                yield from zip(x_data[indices], y_data[indices])
+
+                # if remainder is not None:
+                #     x_data = np.concatenate((remainder[0], x_data))
+                #     y_data = np.concatenate((remainder[1], y_data))
+                #
+                # indices = np.random.permutation(len(x_data)) if self.key == "train" else np.arange(len(x_data))
+                # for b in range(0, len(indices), 1800):
+                #     i = indices[b:b + 1800]
+                #     if len(i) < 1800 and self.key == "train":
+                #         remainder = x_data[i], y_data[i]
+                #     else:
+                #         yield x_data[i], y_data[i]
             else:
-                if remainder is not None and self.key != "train":
-                    yield remainder
+                # if remainder is not None and self.key != "train":
+                #     yield remainder
                 break
             n += 1
             if self.limit is not None and n >= self.limit:
@@ -148,92 +170,99 @@ class BCNet(nn.Module):
         return self.action_out(x)
 
 
+def collate(batch):
+    x, y = zip(*batch)
+    # for b in batch:
+    #     x.append(b[0])
+    #     y.append(b[1])
+    return (torch.from_numpy(np.stack(x)).float(),
+            torch.from_numpy(np.stack(y)).long())
+
+
 def train_bc():
     assert torch.cuda.is_available()
-    train_dataset = BCDataset(r"D:\rokutleg\ssl-dataset", "train")
-    val_dataset = BCDataset(r"D:\rokutleg\ssl-dataset", "validation")
+    train_dataset = BCDataset(r"D:\rokutleg\ssl-dataset-relabeled", "train")
+    val_dataset = BCDataset(r"D:\rokutleg\ssl-dataset-relabeled", "validation", limit=10)
 
     ff_dim = 2048
     dropout_rate = 0.
-    lr = 1e-4
+    lr = 5e-5
+    batch_size = 300
 
     model = BCNet(ff_dim, dropout_rate)
     print(model)
     model = torch.jit.trace(model, torch.zeros(10, 169)).cuda()
     print(f"Model has {sum(p.numel() for p in model.parameters() if p.requires_grad)} parameters")
+
     optimizer = torch.optim.Adam(model.parameters(), lr)
     loss_fn = nn.CrossEntropyLoss()
+    scheduler = LambdaLR(optimizer, lr_lambda=lambda e: 1 / (e + 1))
 
     logger = wandb.init(group="behavioral-cloning", project="replay-model", entity="rolv-arild",
-                        config=dict(ff_dim=ff_dim, dropout_rate=dropout_rate, lr=lr))
-
-    def collate(batch):
-        x = []
-        y = []
-        for b in batch:
-            x.append(b[0])
-            y.append(b[1])
-        return (torch.from_numpy(np.concatenate(x)).float(),
-                torch.from_numpy(np.concatenate(y)).long())
+                        config=dict(ff_dim=ff_dim, dropout_rate=dropout_rate, lr=lr, batch_size=batch_size,
+                                    optimizer=type(optimizer).__name__, lr_schedule=scheduler is not None))
 
     min_loss = float("inf")
+
+    steps_per_hour = 108000
+    assert steps_per_hour % batch_size == 0
+    train_log_rate = 1
+    val_log_rate = 24
 
     n = 0
     tot_loss = k = 0
     for epoch in range(100):
         model.train()
-        train_loader = DataLoader(train_dataset, 5, collate_fn=collate)
+        train_loader = DataLoader(train_dataset, batch_size, collate_fn=collate, drop_last=True)
         for x_train, y_train in train_loader:
+            total_samples = batch_size * n
+
+            if total_samples % (val_log_rate * steps_per_hour) == 0:
+                print("Validating...")
+                with torch.no_grad():
+                    model.eval()
+                    val_loader = DataLoader(val_dataset, 9000, collate_fn=collate)
+                    loss = m = 0
+                    correct = total = 0
+                    for x_val, y_val in val_loader:
+                        y_hat = model(x_val.cuda())
+                        loss += loss_fn(y_hat, y_val.cuda()).item()
+                        correct += (y_hat.cpu().argmax(axis=-1) == y_val).sum().item()
+                        total += len(y_val)
+                        m += 1
+                    loss /= m
+                    logger.log({"validation/loss": loss}, commit=False)
+                    logger.log({"validation/accuracy": correct / total}, commit=False)
+                    print(f"Day {total_samples // (val_log_rate * steps_per_hour)}:", loss)
+                    if loss < min_loss:
+                        torch.jit.save(model, f"bc-model-{logger.name}.pt")
+                        print(f"Model saved at day {total_samples // (val_log_rate * steps_per_hour)} "
+                              f"with total validation loss {loss}")
+                        min_loss = loss
+                model.train()
+
             y_hat = model(x_train.cuda())
             loss = loss_fn(y_hat, y_train.cuda())
             tot_loss += loss.item()
             k += 1
-            validate = (n + 1) % (12 * 24) == 0
-            if n % 12 == 0:
+            if total_samples % (train_log_rate * steps_per_hour) == 0:
                 logger.log({"epoch": epoch}, commit=False)
-                logger.log({"train/samples": n * 1800 * 5}, commit=False)
-                logger.log({"train/loss": tot_loss / k}, commit=not validate)
-                print(f"Hour {n // 12}:", tot_loss / k)
+                logger.log({"train/samples": total_samples}, commit=False)
+                logger.log({"train/loss": tot_loss / k}, commit=False)
+                logger.log({"train/learning_rate": scheduler.get_last_lr()[0]})
+                print(f"Hour {total_samples // steps_per_hour}:", tot_loss / k)
                 tot_loss = k = 0
 
             loss.backward()
             optimizer.step()
             model.zero_grad(True)
             n += 1
-
-            if validate:
-                print("Validating...")
-                with torch.no_grad():
-                    model.eval()
-                    val_loader = DataLoader(val_dataset, 12, collate_fn=collate)
-                    m = 0
-                    loss = 0
-                    for x_val, y_val in val_loader:
-                        y_hat = model(x_val.cuda())
-                        loss += loss_fn(y_hat, y_val.cuda()).item()
-                        m += 1
-                    loss /= m
-                    logger.log({"epoch": epoch}, commit=False)
-                    logger.log({"validation/loss": loss})
-                    print(f"Day {n // (12 * 24)}:", loss)
-                    if loss < min_loss:
-                        torch.jit.save(model, "bc-model.pt")
-                        print(f"Model saved at day {n // (12 * 24)} with total validation loss {loss}")
-                        min_loss = loss
+        scheduler.step()
 
 
 def test_bc():
     test_dataset = BCDataset(r"D:\rokutleg\ssl-dataset-fixed", "test")
     model = torch.jit.load("bc-model.pt").cuda()
-
-    def collate(batch):
-        x = []
-        y = []
-        for b in batch:
-            x.append(b[0])
-            y.append(b[1])
-        return (torch.from_numpy(np.concatenate(x)).float(),
-                torch.from_numpy(np.concatenate(y)).long())
 
     with open("bc-results.csv", "w") as f:
         f.write("action_pred,action_true\n")
@@ -253,8 +282,8 @@ if __name__ == '__main__':
     # pr = cProfile.Profile()
     # pr.enable()
 
-    make_bc_dataset(r"E:\rokutleg\parsed\2021-ssl-replays\ranked-doubles",
-                    r"D:\rokutleg\ssl-dataset")
+    # make_bc_dataset(r"E:\rokutleg\parsed\2021-ssl-replays\ranked-doubles",
+    #                 r"D:\rokutleg\ssl-dataset-relabeled")
 
     # pr.disable()
     # s = io.StringIO()
@@ -265,5 +294,6 @@ if __name__ == '__main__':
     #
     # ps.dump_stats("profile_results.pstat")
 
+    # time.sleep(3 * 60 * 60)
     train_bc()
     # test_bc()
