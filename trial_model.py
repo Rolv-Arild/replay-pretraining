@@ -10,6 +10,7 @@ from rlgym.utils.gamestates import GameState, PlayerData, PhysicsObject
 from rlgym.utils.obs_builders import AdvancedObs
 from rlgym.utils.state_setters import RandomState
 from rlgym.utils.terminal_conditions.common_conditions import TimeoutCondition, GoalScoredCondition
+from rlgym_tools.extra_state_setters.replay_setter import ReplaySetter
 from torch.distributions import Categorical
 
 from util import lookup_table
@@ -108,23 +109,24 @@ class TimerObs(ObsBuilder):
 if __name__ == '__main__':
     ts = 1
     env = rlgym.make(game_speed=1, spawn_opponents=True, team_size=2,
-                     # state_setter=RandomState(True, True, False),
+                     # state_setter=ReplaySetter(np.load("plat+dia+champ+gc+ssl_2v2.npy")),
                      obs_builder=TimerObs(),
                      terminal_conditions=[TimeoutCondition(120 * 5 * 60 // ts), GoalScoredCondition()],
                      use_injector=True, tick_skip=ts)
 
     deterministic = False
     m = 1
+    model_paths = ["bc-model-playful-gorge-108.pt"] * 2 + ["bc-model-likely-universe-104.pt"] * 2
 
     try:
         with torch.no_grad():
             while True:
-                model = torch.jit.load("bc-model-solar-dust-98.pt").cpu()
-                model.eval()
+                models = [torch.jit.load(model_path).cpu().eval() for model_path in model_paths]
                 obs, info = env.reset(return_info=True)
                 done = False
                 while not done:
-                    out = m * model(torch.from_numpy(np.stack(obs)).float())
+                    out = torch.cat([m * model(torch.from_numpy(np.expand_dims(obs[i], 0)).float())
+                                     for i, model in enumerate(models)])
 
                     state = info["state"]
                     for i, player in enumerate(state.players):
@@ -133,10 +135,10 @@ if __name__ == '__main__':
 
                     dist = Categorical(logits=out)
                     if deterministic:
-                        action_indices = out.argmax(axis=-1).numpy()
+                        action_indices = out.argmax(dim=-1).numpy()
                     else:
                         action_indices = dist.sample().numpy()
-                    print(action_indices, dist.entropy().mean().item())
+                    # print(action_indices, dist.entropy().mean().item())
                     actions = lookup_table[action_indices]
                     for _ in range(4 // ts):
                         obs, reward, done, info = env.step(actions)

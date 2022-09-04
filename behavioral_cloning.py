@@ -18,21 +18,28 @@ from util import encoded_states_to_advanced_obs, lookup_table
 
 
 def make_bc_dataset(input_folder, output_folder, shard_size=30 * 60 * 60):
-    train = [[], [], 0, "train"]
-    validation = [[], [], 0, "validation"]
-    test = [[], [], 0, "test"]
+    train = [[], [], 0, "train", []]
+    validation = [[], [], 0, "validation", []]
+    test = [[], [], 0, "test", []]
     n_players = None
-    for replay_path in sorted(glob.glob(f"{input_folder}/**/__game.parquet", recursive=True),
+    os.makedirs(output_folder, exist_ok=True)
+    progress_file = open(os.path.join(output_folder, "_parsed_replays.txt"), "a+")
+    progress_file.seek(0)
+    parsed = set(progress_file.read().split("\n"))
+    replay_paths = [os.path.join(dp, f) for dp, dn, fn in os.walk(input_folder) for f in fn if f == "__game.parquet"]
+    for replay_path in sorted(replay_paths,
                               key=lambda p: os.path.basename(os.path.dirname(p))):
         replay_path = os.path.dirname(replay_path)
         replay_id = os.path.basename(replay_path)
-        if int(replay_id[0], 16) < 3:
+
+        if replay_id in parsed:
+            print(replay_id, "already parsed")
             continue
 
         s = sum(int(d, 16) for d in replay_id.replace("-", ""))
-        if s % 100 < 90:
+        if s % 100 < 96:
             arrs = train
-        elif s % 100 < 95:
+        elif s % 100 < 98:
             arrs = validation
         else:
             arrs = test
@@ -42,34 +49,27 @@ def make_bc_dataset(input_folder, output_folder, shard_size=30 * 60 * 60):
         except Exception as e:
             print("Error in replay", replay_id, e)
             continue
-        if n_players is None:
-            n_players = len(parsed_replay.metadata["players"])
-        elif len(parsed_replay.metadata["players"]) != n_players or n_players % 2 != 0:
+        if len(parsed_replay.metadata["players"]) % 2 != 0:
             continue
-        # prev_actions = np.zeros((n_players, 8))
-        # obs_builder = AdvancedObs()
-        x_data, y_data = arrs[:2]
-        for episode in label_replay(parsed_replay):
-            df, actions = episode
-            for obs, action in encoded_states_to_advanced_obs(df, actions):
-                x_data.append(obs)
-                y_data.append(action)
-                arrs[2] += len(obs)
+        elif n_players is None:
+            n_players = len(parsed_replay.metadata["players"])
+        elif len(parsed_replay.metadata["players"]) != n_players:
+            continue
 
-            # for i, (state, action) in enumerate(episode):
-            #     if i == 0:
-            #         obs_builder.reset(state)
-            #         if (action == 8).all():
-            #             continue
-            #     for j, (player, act) in enumerate(zip(state.players, action)):
-            #         obs = obs_builder.build_obs(player, state, prev_actions[j])
-            #         x_data.append(obs)
-            #         y_data.append(act)
-            #         arrs[2] += 1
-            #         if act.shape == (8,):
-            #             prev_actions[j] = act
-            #         else:
-            #             prev_actions[j] = lookup_table[act.astype(int)]
+        try:
+            x_data, y_data = arrs[:2]
+            for episode in label_replay(parsed_replay):
+                df, actions = episode
+                for obs, action in encoded_states_to_advanced_obs(df, actions):
+                    x_data.append(obs)
+                    y_data.append(action)
+                    arrs[2] += len(obs)
+        except Exception as e:
+            print("Error labeling replay", replay_id, e)
+            continue
+
+        arrs[4].append(replay_id)
+
         if arrs[2] > shard_size:
             x_data = np.concatenate(x_data)
             y_data = np.concatenate(y_data)
@@ -79,9 +79,14 @@ def make_bc_dataset(input_folder, output_folder, shard_size=30 * 60 * 60):
             np.savez_compressed(os.path.join(output_folder, f"{split}-shard-{split_shards}.npz"),
                                 x_data=x_data, y_data=y_data)
             arrs[:3] = [], [], 0
+            progress_file.write("\n".join(arrs[4]) + "\n")
+            progress_file.flush()
+            arrs[4] = []
         print(replay_id)
     for arrs in train, validation, test:
         x_data, y_data = arrs[:2]
+        if len(x_data) == 0:
+            continue
         x_data = np.concatenate(x_data)
         y_data = np.concatenate(y_data)
         assert len(x_data) == len(y_data)
@@ -90,6 +95,9 @@ def make_bc_dataset(input_folder, output_folder, shard_size=30 * 60 * 60):
         np.savez_compressed(os.path.join(output_folder, f"{split}-shard-{split_shards}.npz"),
                             x_data=x_data, y_data=y_data)
         arrs[:3] = [], [], 0
+        progress_file.write("\n".join(arrs[4]) + "\n")
+        progress_file.flush()
+        arrs[4] = []
 
 
 class BCDataset(IterableDataset):
@@ -100,6 +108,12 @@ class BCDataset(IterableDataset):
 
     def __iter__(self) -> Iterator[T_co]:
         n = 0
+
+        def rolling_window(a, window):
+            shape = a.shape[:-1] + (a.shape[-1] - window + 1, window)
+            strides = a.strides + (a.strides[-1],)
+            return np.lib.stride_tricks.as_strided(a, shape=shape, strides=strides)
+
         while True:
             file = f"{self.key}-shard-{n}.npz"
             path = os.path.join(self.folder, file)
@@ -122,7 +136,7 @@ class BCDataset(IterableDataset):
 
                     x_data = x_data[mask]
                     y_data = y_data[mask]
-                except zipfile.BadZipFile:
+                except (zipfile.BadZipFile, EOFError):
                     n += 1
                     continue
 
@@ -151,11 +165,11 @@ class BCDataset(IterableDataset):
 
 
 class BCNet(nn.Module):
-    def __init__(self, ff_dim, dropout_rate):
+    def __init__(self, ff_dim, hidden_layers, dropout_rate):
         super().__init__()
         # self.conv = nn.Conv1d(45, conv_channels, kernel_size=(41,), stride=(1,))
         self.lin0 = nn.Linear(169, ff_dim)
-        self.hidden_layers = nn.ModuleList([nn.Linear(ff_dim, ff_dim) for _ in range(3)])
+        self.hidden_layers = nn.ModuleList([nn.Linear(ff_dim, ff_dim) for _ in range(hidden_layers)])
         self.dropout = nn.Dropout(dropout_rate)
 
         self.action_out = nn.Linear(ff_dim, 90)
@@ -181,22 +195,23 @@ def collate(batch):
 
 def train_bc():
     assert torch.cuda.is_available()
-    train_dataset = BCDataset(r"D:\rokutleg\ssl-dataset-relabeled", "train")
-    val_dataset = BCDataset(r"D:\rokutleg\ssl-dataset-relabeled", "validation", limit=10)
+    train_dataset = BCDataset(r"E:\rokutleg\ssl-dataset\ranked-doubles", "train")
+    val_dataset = BCDataset(r"E:\rokutleg\ssl-dataset\ranked-doubles", "validation", limit=10)
 
-    ff_dim = 2048
+    ff_dim = 1024
+    hidden_layers = 6
     dropout_rate = 0.
     lr = 5e-5
     batch_size = 300
 
-    model = BCNet(ff_dim, dropout_rate)
+    model = BCNet(ff_dim, hidden_layers, dropout_rate)
     print(model)
     model = torch.jit.trace(model, torch.zeros(10, 169)).cuda()
     print(f"Model has {sum(p.numel() for p in model.parameters() if p.requires_grad)} parameters")
 
     optimizer = torch.optim.Adam(model.parameters(), lr)
     loss_fn = nn.CrossEntropyLoss()
-    scheduler = LambdaLR(optimizer, lr_lambda=lambda e: 1 / (e + 1))
+    scheduler = LambdaLR(optimizer, lr_lambda=lambda e: 1 / (0.25 * e + 1))
 
     logger = wandb.init(group="behavioral-cloning", project="replay-model", entity="rolv-arild",
                         config=dict(ff_dim=ff_dim, dropout_rate=dropout_rate, lr=lr, batch_size=batch_size,
@@ -283,7 +298,13 @@ if __name__ == '__main__':
     # pr.enable()
 
     # make_bc_dataset(r"E:\rokutleg\parsed\2021-ssl-replays\ranked-doubles",
-    #                 r"D:\rokutleg\ssl-dataset-relabeled")
+    #                 r"E:\rokutleg\ssl-dataset\ranked-doubles")
+    #
+    # make_bc_dataset(r"E:\rokutleg\parsed\2021-ssl-replays\ranked-duels",
+    #                 r"E:\rokutleg\ssl-dataset\ranked-duels")
+    #
+    # make_bc_dataset(r"E:\rokutleg\parsed\2021-ssl-replays\ranked-standard",
+    #                 r"E:\rokutleg\ssl-dataset\ranked-standard")
 
     # pr.disable()
     # s = io.StringIO()

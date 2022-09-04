@@ -128,11 +128,11 @@ class IDMDataset(IterableDataset):
 
 
 class IDMNet(nn.Module):
-    def __init__(self, ff_dim, dropout_rate):
+    def __init__(self, ff_dim, hidden_layers, dropout_rate):
         super().__init__()
         # self.conv = nn.Conv1d(45, conv_channels, kernel_size=(41,), stride=(1,))
         self.lin0 = nn.Linear(1845, ff_dim)
-        self.hidden_layers = nn.ModuleList([nn.Linear(ff_dim, ff_dim) for _ in range(3)])
+        self.hidden_layers = nn.ModuleList([nn.Linear(ff_dim, ff_dim) for _ in range(hidden_layers)])
         self.dropout = nn.Dropout(dropout_rate)
 
         self.action_out = nn.Linear(ff_dim, 90)
@@ -172,22 +172,24 @@ def train_idm():
     train_dataset = IDMDataset(r"D:\rokutleg\idm-dataset", "train")
     val_dataset = IDMDataset(r"D:\rokutleg\idm-dataset", "validation", limit=10)
 
-    ff_dim = 2048
+    ff_dim = 1024
+    hidden_layers = 6
     dropout_rate = 0.
     lr = 5e-5
     batch_size = 300
 
-    model = IDMNet(ff_dim, dropout_rate)
+    model = IDMNet(ff_dim, hidden_layers, dropout_rate)
     print(model)
     model = torch.jit.trace(model, torch.zeros(10, 41, 45)).cuda()
     print(f"Model has {sum(p.numel() for p in model.parameters() if p.requires_grad)} parameters")
 
     optimizer = torch.optim.Adam(model.parameters(), lr)
     loss_fn = nn.CrossEntropyLoss()
-    scheduler = LambdaLR(optimizer, lr_lambda=lambda e: 1 / (0.5 * e + 1))
+    scheduler = LambdaLR(optimizer, lr_lambda=lambda e: 1 / (0.2 * e + 1))
 
     logger = wandb.init(group="idm", project="replay-model", entity="rolv-arild",
-                        config=dict(ff_dim=ff_dim, dropout_rate=dropout_rate, lr=lr, batch_size=batch_size,
+                        config=dict(ff_dim=ff_dim, hidden_layers=hidden_layers,
+                                    dropout_rate=dropout_rate, lr=lr, batch_size=batch_size,
                                     optimizer=type(optimizer).__name__, lr_schedule=scheduler is not None))
 
     min_loss = float("inf")
