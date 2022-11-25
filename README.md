@@ -1,7 +1,7 @@
 # RL-RPT - Rocket League Replay Pre-Training
 One of the most common questions we get when [showing off our reinforcement learning bots](https://www.twitch.tv/rlgym), is "Could they learn from watching humans play?".
 
-For a long time, the answer was (essentially) no. The previous best result I'm aware of is [this](https://www.youtube.com/watch?v=-928X5gDjzc) bot, trained on 15 000 gold/silver 1v1 replays. Not exactly earth-shattering.
+For a long time, the answer was (essentially) no. The previous best result I'm aware of is [this](https://natebake.dev/code/rl-ai/) bot, trained on 15 000 gold/silver 1v1 replays. A fun project to be sure, but not exactly earth-shattering.
 
 ## Why haven't people done it before?
 There are a couple reasons previous attempts haven't been particularly successful:
