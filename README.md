@@ -12,7 +12,7 @@ There are a couple reasons previous attempts haven't been particularly successfu
 4. Humans are very inconsistent and make very different choices in situations, there's no single right action to take.
 
 In the RLBot Botpack, TensorBot and Levi are actually trained on inputs/outputs of bots, 
-which works alright since we can get super-accurate inputs and consistent outputs, but then again it's doubtful that method would ever outperform the bot its trained on
+which works alright since we can get super-accurate inputs and consistent outputs, but then again it's doubtful that method would ever outperform the bot its trained on.
 
 
 ## Why is this different?
