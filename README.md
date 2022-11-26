@@ -7,11 +7,11 @@ For a long time, the answer was (essentially) no. The previous best result I'm a
 There are a couple reasons previous attempts haven't been particularly successful:
 
 1. Replays do not contain all the player inputs. Some of them are included, and it's theoretically possible to infer the rest algorithmically but...
-2. Replays are lossy reconstructions of data from the server, Rocket League's in-game interpolation does a lot of heavy lifting.
+2. Replays are lossy reconstructions of data from the server. Rocket League's in-game interpolation does a lot of heavy lifting.
 3. Because of compounding error, a ridiculously high accuracy is needed. Choosing the wrong action at any time can lead to states the model hasn't seen before and doesn't know how to recover from.
 4. Humans are very inconsistent and make very different choices in situations, there's no single right action to take.
 
-In the RLBot Botpack, TensorBot and Levi are actually trained on inputs/outputs of bots, 
+In the [RLBot](https://rlbot.org/) [Botpack](https://github.com/RLBot/RLBotPack), TensorBot and Levi are actually trained on inputs/outputs of bots, 
 which works alright since we can get super-accurate inputs and consistent outputs, but then again it's doubtful that method would ever outperform the bot its trained on.
 
 
@@ -20,7 +20,7 @@ The new idea here - inspired by [a paper from OpenAI](https://openai.com/blog/vp
 we can teach a network, called the IDM (Inverse Dynamics Model) to look at past and future states and determine which action *was* taken at a given moment in time.[^1]
 
 In principle we could do this by just spawning a car in random locations to do random actions, but to get as close as possible to human gameplay, 
-we recorded gameplay from Nexto via RLGym. Some adjustments were made to reduce overfitting to Nexto[^2], and some randomness was sprinkled in to cover more possible states and actions. 
+we recorded gameplay from [Nexto](https://github.com/Rolv-Arild/Necto) via [RLGym](https://rlgym.org/). Some adjustments were made to reduce overfitting to Nexto's outputs[^2], and some randomness was sprinkled in to cover more possible states and actions. 
 This also has the added benefit of restricting the space of possible actions: Nexto only picks from 90 different ones that should approximately cover everything that's possible.
 When the data is collected, all we have to do is give the model a series of states[^3], and train it to predict which action was taken.[^4]
 
