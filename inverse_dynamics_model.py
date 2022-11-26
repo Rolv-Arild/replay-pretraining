@@ -1,4 +1,5 @@
 import os
+import time
 import zipfile
 from typing import Iterator
 
@@ -21,8 +22,9 @@ def make_idm_dataset(in_folder, out_folder, shard_size=60 * 60 * 30):
     train = [[], 0, "train"]
     validation = [[], 0, "validation"]
     test = [[], 0, "test"]
+    window_size = 38
     for file in os.listdir(in_folder):
-        s = sum(int(d) for d in file.replace(".npz", ""))
+        s = int(file.replace(".npz", ""), 13)
         if s % 100 < 90:
             arrs = train
         elif s % 100 < 95:
@@ -44,11 +46,11 @@ def make_idm_dataset(in_folder, out_folder, shard_size=60 * 60 * 30):
         actions = f["actions"]
 
         for x, y in get_data(states, actions):
-            if not pad and len(x) < 41:
+            if not pad and len(x) < 2 * window_size + 1:
                 continue
-            window = rolling_window(np.arange(len(x)), 41, pad_start=pad, pad_end=pad)
+            window = rolling_window(np.arange(len(x)), 2 * window_size + 1, pad_start=pad, pad_end=pad)
             grouped_x = x[window]
-            grouped_y = tuple(y[i][window[:, 20]] for i in range(len(y)))
+            grouped_y = tuple(y[i][window[:, window_size]] for i in range(len(y)))
             normalize_quadrant(grouped_x, grouped_y)
 
             arrs[0].append((grouped_x, grouped_y))
@@ -131,7 +133,7 @@ class IDMNet(nn.Module):
     def __init__(self, ff_dim, hidden_layers, dropout_rate):
         super().__init__()
         # self.conv = nn.Conv1d(45, conv_channels, kernel_size=(41,), stride=(1,))
-        self.lin0 = nn.Linear(1845, ff_dim)
+        self.lin0 = nn.Linear(77 * 45, ff_dim)
         self.hidden_layers = nn.ModuleList([nn.Linear(ff_dim, ff_dim) for _ in range(hidden_layers)])
         self.dropout = nn.Dropout(dropout_rate)
 
@@ -142,7 +144,7 @@ class IDMNet(nn.Module):
 
     def forward(self, x: torch.Tensor):
         # x = self.conv(x.swapaxes(1, 2))
-        x = self.lin0(torch.reshape(x, (x.shape[0], 1845)))
+        x = self.lin0(torch.reshape(x, (x.shape[0], 77 * 45)))
         x = F.relu(self.dropout(x))
         for hidden_layer in self.hidden_layers:
             x = hidden_layer(x)
@@ -180,7 +182,7 @@ def train_idm():
 
     model = IDMNet(ff_dim, hidden_layers, dropout_rate)
     print(model)
-    model = torch.jit.trace(model, torch.zeros(10, 41, 45)).cuda()
+    model = torch.jit.trace(model, torch.zeros(10, 77, 45)).cuda()
     print(f"Model has {sum(p.numel() for p in model.parameters() if p.requires_grad)} parameters")
 
     optimizer = torch.optim.Adam(model.parameters(), lr)
@@ -197,7 +199,7 @@ def train_idm():
     steps_per_hour = 108000
     assert steps_per_hour % batch_size == 0
     train_log_rate = 1
-    val_log_rate = 24
+    val_log_rate = 7 * 24
 
     n = 0
 

@@ -225,7 +225,7 @@ def label_replay(parsed_replay: Replay):
             n_players = len(uids)
             actions = np.zeros((len(df), n_players))
             for i, (x, _) in enumerate(get_data_df(df, actions)):
-                x_rolled = x[rolling_window(np.arange(len(x)), 41, True, True)]
+                x_rolled = x[rolling_window(np.arange(len(x)), 77, True, True)]
                 mirrored = normalize_quadrant(x_rolled, [np.zeros((len(x), n_players))])
                 inp = torch.from_numpy(x_rolled).float().cuda()
                 y_hat = [0.] * 4

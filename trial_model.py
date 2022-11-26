@@ -7,8 +7,6 @@ import torch.jit
 from rlgym.utils import ObsBuilder, common_values
 from rlgym.utils.common_values import BOOST_LOCATIONS
 from rlgym.utils.gamestates import GameState, PlayerData, PhysicsObject
-from rlgym.utils.obs_builders import AdvancedObs
-from rlgym.utils.state_setters import RandomState
 from rlgym.utils.terminal_conditions.common_conditions import TimeoutCondition, GoalScoredCondition
 from rlgym_tools.extra_state_setters.replay_setter import ReplaySetter
 from torch.distributions import Categorical
@@ -22,10 +20,12 @@ class TimerObs(ObsBuilder):
     POS_STD = 2300  # If you read this and wonder why, ping Rangler in the dead of night.
     ANG_STD = math.pi
 
-    def __init__(self):
+    def __init__(self, pad_to=231):
         super().__init__()
         self.boost_timers = None
         self.demo_timers = None
+        self.pad_to = pad_to
+        self.action_history = np.zeros(80)
 
     def reset(self, initial_state: GameState):
         self.boost_timers = np.zeros(34)
@@ -79,7 +79,11 @@ class TimerObs(ObsBuilder):
 
         obs.extend(allies)
         obs.extend(enemies)
-        return np.concatenate(obs)
+        obs = np.concatenate(obs)  # + [self.action_history])
+        obs = np.pad(obs, (0, self.pad_to - obs.shape[0]))
+        # self.action_history[8:] = self.action_history[:-8]
+        # self.action_history[:8] = previous_action
+        return obs
 
     def _add_player_to_obs(self, obs: List, player: PlayerData, ball: PhysicsObject, inverted: bool):
         if inverted:
@@ -107,42 +111,57 @@ class TimerObs(ObsBuilder):
 
 
 if __name__ == '__main__':
-    ts = 1
-    env = rlgym.make(game_speed=1, spawn_opponents=True, team_size=2,
-                     # state_setter=ReplaySetter(np.load("plat+dia+champ+gc+ssl_2v2.npy")),
+    ts = 4
+    env = rlgym.make(game_speed=100, spawn_opponents=True, team_size=2,
+                     auto_minimize=True,
+                     state_setter=ReplaySetter(np.load("plat+dia+champ+gc+ssl_2v2.npy")),
                      obs_builder=TimerObs(),
                      terminal_conditions=[TimeoutCondition(120 * 5 * 60 // ts), GoalScoredCondition()],
                      use_injector=True, tick_skip=ts)
 
     deterministic = False
     m = 1
-    model_paths = ["bc-model-playful-gorge-108.pt"] * 2 + ["bc-model-likely-universe-104.pt"] * 2
-
+    model_paths = ["bc-model-stellar-darkness-176.pt"] * 2 + ["bc-model-dutiful-leaf-174.pt"] * 2
     try:
         with torch.no_grad():
             while True:
                 models = [torch.jit.load(model_path).cpu().eval() for model_path in model_paths]
                 obs, info = env.reset(return_info=True)
                 done = False
+                # next_actions = np.zeros((len(models), 8))
+                k = 0
                 while not done:
-                    out = torch.cat([m * model(torch.from_numpy(np.expand_dims(obs[i], 0)).float())
-                                     for i, model in enumerate(models)])
+                    out = torch.cat([
+                        m * model(
+                            torch.from_numpy(np.expand_dims((obs[i][:231]), 0)).float())
+                        for i, model in enumerate(models)
+                    ])
 
                     state = info["state"]
                     for i, player in enumerate(state.players):
                         if (state.ball.linear_velocity < 1).all() and (player.car_data.linear_velocity < 1).all():
-                            out[i, 8] -= 1000
+                            out[i, lookup_table[:, 0] == 0] -= 1000
 
                     dist = Categorical(logits=out)
                     if deterministic:
                         action_indices = out.argmax(dim=-1).numpy()
                     else:
                         action_indices = dist.sample().numpy()
-                    # print(action_indices, dist.entropy().mean().item())
+
+                    if (ts * k) % 120 == 0:
+                        print(action_indices, dist.entropy().mean().item())
                     actions = lookup_table[action_indices]
                     for _ in range(4 // ts):
                         obs, reward, done, info = env.step(actions)
+                        # np.concatenate((next_actions[:2], actions[2:])))
                         if done:
                             break
+
+                    # for o, a in zip(obs[:], actions):
+                    #     o[..., -72:] = o[..., -80:-8]
+                    #     o[..., -80:-72] = o[9:17]
+                    #     o[..., 9:17] = a
+                    # next_actions = actions
+                    k += 1
     finally:
         env.close()
