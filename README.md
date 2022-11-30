@@ -35,7 +35,7 @@ It was never intended to be anything crazy, but act more as a jumping off point 
 The agent I ended up actually looks quite competent. I only tried training on SSL replays, but I think it has quite a few moments where it looks very good, just lacking the consistency and precision.
 You can also judge for yourself:
 
-[Video with almost 6 minutes of gameplay](https://www.youtube.com/watch?v=VXi6f0zhVrk)
+[Video with 10 minutes of varied gameplay](https://www.youtube.com/watch?v=ew_3vA7EitA)
 
 [Imgur album](https://imgur.com/a/zqrQxcD)
 
