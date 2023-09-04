@@ -1,11 +1,14 @@
 import re
 from collections import namedtuple
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 import torch.jit
-from rlgym.utils.common_values import BALL_RADIUS, BLUE_TEAM
+from rlgym.utils.common_values import BALL_RADIUS, BLUE_TEAM, CEILING_Z, BACK_WALL_Y
 from rlgym.utils.gamestates.game_state import GameState
+from torch import nn
+
+INVERT_SIDE_ACTIONS = np.array([1, -1, 1, -1, -1, 1, 1, 1])
 
 
 def make_lookup_table():
@@ -43,6 +46,66 @@ mirror_map = np.array([np.where((lookup_table == action).all(axis=-1))[0][0]
                        for action in lookup_table * np.array([1, -1, 1, -1, -1, 1, 1, 1])], dtype=int)
 
 
+def dist_to_walls(x, y):
+    dist_side_wall = abs(4096 - abs(x))
+    dist_back_wall = abs(5120 - abs(y))
+
+    # From https://stackoverflow.com/questions/849211/shortest-distance-between-a-point-and-a-line-segment
+    x1, y1, x2, y2 = 4096 - 1152, 5120, 4096, 5120 - 1152  # Line segment for corner
+    A = abs(x) - x1
+    B = abs(y) - y1
+    C = x2 - x1
+    D = y2 - y1
+
+    dot = A * C + B * D
+    len_sq = C * C + D * D
+    param = -1
+    if len_sq != 0:  # in case of 0 length line
+        param = dot / len_sq
+
+    if param < 0:
+        xx = x1
+        yy = y1
+    elif param > 1:
+        xx = x2
+        yy = y2
+    else:
+        xx = x1 + param * C
+        yy = y1 + param * D
+
+    dx = abs(x) - xx
+    dy = abs(y) - yy
+    dist_corner_wall = np.sqrt(dx * dx + dy * dy)
+
+    return dist_side_wall, dist_back_wall, dist_corner_wall
+
+
+def group_field_locations(features, label):
+    # TODO finish?
+    calculate_wall_dists = np.vectorize(dist_to_walls)
+
+    mid = features.shape[1] // 2
+    positions = features[:, mid, 0:3]
+    ball_close = features[:, mid, 17]
+
+    threshold = 100 + ball_close * 2 * BALL_RADIUS
+    dist_side_wall, dist_back_wall, dist_corner_wall = calculate_wall_dists(positions[..., 0], positions[..., 1])
+    dist_floor = positions[..., 2]
+    dist_ceiling = CEILING_Z - positions[..., 2]
+
+    outside_goal = positions[..., 1] < BACK_WALL_Y
+
+    far_from_corner = dist_corner_wall > threshold
+    far_from_side_wall = dist_side_wall > threshold
+    far_from_back_wall = dist_back_wall > threshold
+    features[outside_goal & far_from_corner & far_from_side_wall, 0] = 0
+    features[outside_goal & far_from_corner & far_from_back_wall, 1] = 0
+
+    far_from_floor = dist_floor > threshold
+    far_from_ceiling = dist_ceiling > threshold
+    features[outside_goal & far_from_floor & far_from_ceiling, 2] = CEILING_Z / 2
+
+
 def normalize_quadrant(features, label):
     actions = label[0]
     mid = features.shape[1] // 2
@@ -78,7 +141,7 @@ def get_data(states: List["GameState"], actions: np.ndarray):
     positions = np.array([[p.car_data.position for p in state.players] for state in states])
     for i in range(len(states[0].players)):
         x_data = np.zeros((len(states), 45))
-        y_data = tuple(np.zeros(len(states)) for _ in range(4))
+        y_data = (np.zeros((len(states), 8)),) + tuple(np.zeros(len(states)) for _ in range(3))
         for j, state in enumerate(states):
             player = state.players[i]
             action = actions[j][i]
@@ -225,5 +288,40 @@ def encoded_states_to_advanced_obs(df, actions):
     yield from ((obs[i], actions[:, i]) for i in range(len(uids)))
 
 
-idm_model = torch.jit.load("idm-model-icy-paper-137.pt").to("cuda" if torch.cuda.is_available() else "cpu")
+class ControlsPredictorDot(nn.Module):
+    def __init__(self, in_features, features=32, layers=1, actions=None):
+        super().__init__()
+        if actions is not None:
+            self.actions = torch.from_numpy(actions).float()
+        else:
+            self.actions = actions
+        self.invert_side_actions = torch.from_numpy(INVERT_SIDE_ACTIONS).float()
+        self.net = nn.Sequential(
+            nn.Linear(8, in_features),
+            *sum(([nn.ReLU(), nn.Linear(in_features, in_features)] for _ in range(layers)), []),
+            nn.Linear(in_features, features)
+        )
+        self.emb_convertor = nn.Linear(in_features, features)
+
+    def forward(self, player_emb: torch.Tensor, actions: Optional[torch.Tensor] = None, flip=None):
+        if actions is None:
+            if self.actions is not None:
+                actions = self.actions
+            else:
+                raise ValueError("Need to supply action options")
+        actions = actions.to(player_emb.device)
+        if flip is not None:
+            if actions.ndim == 2:
+                actions = actions.unsqueeze(0).repeat(player_emb.shape[0], 1, 1)
+            actions[flip] *= self.invert_side_actions.to(player_emb.device)
+        player_emb = self.emb_convertor(player_emb)
+        act_emb = self.net(actions)
+
+        if act_emb.ndim == 2:
+            return torch.einsum("ad,bd->ba", act_emb, player_emb)
+
+        return torch.einsum("bad,bd->ba", act_emb, player_emb)
+
+
+idm_model = torch.jit.load("models/idm-model-icy-paper-137.pt").to("cuda" if torch.cuda.is_available() else "cpu")
 Replay = namedtuple("Replay", "metadata analyzer ball game players")

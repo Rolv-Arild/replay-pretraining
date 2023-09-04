@@ -1,12 +1,15 @@
 import math
+import os.path
+import random
 from typing import List, Any
 
 import numpy as np
 import rlgym
 import torch.jit
-from rlgym.utils import ObsBuilder, common_values
+from rlgym.utils import ObsBuilder, common_values, StateSetter
 from rlgym.utils.common_values import BOOST_LOCATIONS
 from rlgym.utils.gamestates import GameState, PlayerData, PhysicsObject
+from rlgym.utils.state_setters import StateWrapper, DefaultState
 from rlgym.utils.terminal_conditions.common_conditions import TimeoutCondition, GoalScoredCondition
 from rlgym_tools.extra_state_setters.replay_setter import ReplaySetter
 from torch.distributions import Categorical
@@ -110,31 +113,52 @@ class TimerObs(ObsBuilder):
         return player_car
 
 
+class GamemodeSetter(StateSetter):
+    def __init__(self, setters):
+        self.setters = setters
+
+    def build_wrapper(self, max_team_size: int, spawn_opponents: bool) -> StateWrapper:
+        gamemode = random.randint(1, 3)
+        return StateWrapper(gamemode, gamemode)
+
+    def reset(self, state_wrapper: StateWrapper):
+        gamemode = len(state_wrapper.cars) // 2
+        self.setters[gamemode - 1].reset(state_wrapper)
+
+
 if __name__ == '__main__':
     ts = 4
-    env = rlgym.make(game_speed=100, spawn_opponents=True, team_size=2,
-                     auto_minimize=True,
-                     state_setter=ReplaySetter(np.load("plat+dia+champ+gc+ssl_2v2.npy")),
+    env = rlgym.make(game_speed=1, spawn_opponents=True, team_size=3,
+                     auto_minimize=False,
+                     state_setter=GamemodeSetter([
+                         DefaultState(), DefaultState(), DefaultState()
+                         # ReplaySetter(np.load("plat+dia+champ+gc+ssl_1v1.npy")),
+                         # ReplaySetter(np.load("plat+dia+champ+gc+ssl_2v2.npy")),
+                         # ReplaySetter(np.load("plat+dia+champ+gc+ssl_3v3.npy"))
+                     ]),
                      obs_builder=TimerObs(),
                      terminal_conditions=[TimeoutCondition(120 * 5 * 60 // ts), GoalScoredCondition()],
                      use_injector=True, tick_skip=ts)
 
     deterministic = False
     m = 1
-    model_paths = ["bc-model-stellar-darkness-176.pt"] * 2 + ["bc-model-dutiful-leaf-174.pt"] * 2
+    model_paths = ["../bc-model-valiant-puddle-180.pt"] * 3 + ["../bc-model-wise-snowflake-178.pt"] * 3
     try:
         with torch.no_grad():
             while True:
-                models = [torch.jit.load(model_path).cpu().eval() for model_path in model_paths]
+                models = [torch.jit.load(os.path.join("models", model_path)).cpu().eval()
+                          for model_path in model_paths]
+
                 obs, info = env.reset(return_info=True)
+                gamemode = len(info["state"].players) // 2
                 done = False
                 # next_actions = np.zeros((len(models), 8))
                 k = 0
                 while not done:
                     out = torch.cat([
-                        m * model(
+                        m * models[i + 3 * (i // (2 * gamemode))](
                             torch.from_numpy(np.expand_dims((obs[i][:231]), 0)).float())
-                        for i, model in enumerate(models)
+                        for i in range(2 * gamemode)
                     ])
 
                     state = info["state"]

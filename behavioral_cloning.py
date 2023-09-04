@@ -300,6 +300,8 @@ class BCNet(nn.Module):
     def forward(self, inp: torch.Tensor):
         ball_boosts_agents = inp[..., :76]
 
+        ball_boosts_agents[:, 9:14] = 0  # Throttle, steer, pitch, yaw, roll (too much bias)
+
         x_bba = ball_boosts_agents
         for layer in self.pre_bba:
             x_bba = layer(x_bba)
