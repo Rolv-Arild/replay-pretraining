@@ -1,12 +1,9 @@
 import argparse
 import os
-import time
 
 import numpy as np
 import rlgym
 import rlgym_sim
-from numpy import random as rand
-from rlgym.utils.math import rand_vec3
 from rlgym.utils.state_setters import RandomState
 from rlgym.utils.state_setters import StateSetter
 from rlgym.utils.state_setters import StateWrapper
@@ -15,8 +12,9 @@ from rlgym_sim.utils.gamestates import GameState
 from rlgym_sim.utils.terminal_conditions.common_conditions import TimeoutCondition
 from rlgym_tools.extra_state_setters.replay_setter import ReplaySetter
 from rlgym_tools.extra_state_setters.weighted_sample_setter import WeightedSampleSetter
-from scipy.special import lambertw
 from tqdm import tqdm
+
+from util import random_action, mutate_action
 
 X_MAX = 7000
 Y_MAX = 9000
@@ -29,44 +27,13 @@ ROLL_MAX = np.pi
 TICKS_PER_SECOND = 120
 
 
-def random_action_hold_duration(mean):
-    assert mean > 1
-    x = np.random.uniform()
-    duration = -(mean - 1) * (1 + lambertw((x - 1) / np.e, -1).real)
-    return 1 + round(duration)
-
-
-def random_action():
-    a = np.zeros(8)
-    a = mutate_action(a, list(range(8)))
-    return a
-
-
-def mutate_action(a, indices=None):
-    a = np.copy(a)
-    if indices is None:
-        indices = np.where(np.random.random(size=8) < 1 / 4)[0]
-    for i in indices:
-        if i < 5:
-            r = np.random.random() ** (0.5 if i == 0 else 1)
-            cutoffs = [0.2, 0.4, 0.6, 0.8] if i == 0 else [0.2, 0.3, 0.7, 0.8]
-            if r < cutoffs[0]:
-                a[i] = -1
-            elif r < cutoffs[1]:
-                a[i] = -np.random.random()
-            elif r < cutoffs[2]:
-                a[i] = 0
-            elif r < cutoffs[3]:
-                a[i] = +np.random.random()
-            else:
-                a[i] = +1
-        elif i == 5:
-            a[5] = np.random.random() < 0.2
-        elif i == 6:
-            a[6] = np.random.random() < 0.2
-        elif i == 7:
-            a[7] = np.random.random() < 0.1
-    return a
+def random_action_hold_duration(p):
+    n = 1
+    while True:
+        x = np.random.uniform()
+        if x > p:
+            return n
+        n += 1
 
 
 def encode_gamestate(state: GameState):
@@ -136,45 +103,7 @@ class RemoveBallState(StateSetter):
         state_wrapper.ball.angular_velocity[:] = [0, 0, 0]
 
 
-class BetterRandom(RandomState):
-    def _reset_cars_random(self, state_wrapper: StateWrapper, on_ground: bool, random_speed: bool):
-        """
-        Function to set all cars to a random position.
-
-        :param state_wrapper: StateWrapper object to be modified.
-        :param on_ground: Boolean indicating whether to place cars only on the ground.
-        :param random_speed: Boolean indicating whether to randomize velocity values.
-        """
-        for car in state_wrapper.cars:
-            # set random position and rotation for all cars based on pre-determined ranges
-            car.set_pos(rand.random() * X_MAX - X_MAX / 2, rand.random()
-                        * Y_MAX - Y_MAX / 2, rand.random() * Z_MAX_CAR + 150)
-            car.set_rot(rand.random() * PITCH_MAX - PITCH_MAX / 2, rand.random()
-                        * YAW_MAX - YAW_MAX / 2, rand.random() * ROLL_MAX - ROLL_MAX / 2)
-
-            car.boost = rand.random()
-
-            if random_speed:
-                # set random linear and angular velocity based on pre-determined ranges
-                car.set_lin_vel(*rand_vec3(2300))
-                car.set_ang_vel(*rand_vec3(5.5))
-
-            # 100% of cars will be set on ground if on_ground == True
-            # otherwise, 50% of cars will be set on ground
-            if on_ground:
-                # z position (up/down) is set to ground
-                car.set_pos(z=17)
-                # z linear velocity (vertical) set to 0
-                car.set_lin_vel(z=0)
-                # pitch (front of car up/down) set to 0
-                # roll (side of car up/down) set to 0
-                car.set_rot(pitch=0, roll=0)
-                # x angular velocity (affects pitch) set to 0
-                # y angular velocity (affects) roll) set to 0
-                car.set_ang_vel(x=0, y=0)
-
-
-def main(tick_skip, timeout_seconds, mean_action_hold_steps, n_players, include_ball, include_players, output_folder):
+def main(tick_skip, timeout_seconds, prob_continue_action, n_players, include_ball, include_players, use_sim, output_folder):
     terminals = [TimeoutCondition(timeout_seconds * TICKS_PER_SECOND // tick_skip)]
     if not include_ball:
         terminals.append(CloseToBallCondition())
@@ -189,22 +118,30 @@ def main(tick_skip, timeout_seconds, mean_action_hold_steps, n_players, include_
         [0.5, 0.5]
     ))
 
-    env = rlgym.make(
-        game_speed=100,
-        auto_minimize=True,
-        tick_skip=tick_skip,
-        terminal_conditions=terminals,
-        team_size=(n_players // 2) if n_players > 1 else 1,
-        spawn_opponents=n_players > 1,
-        state_setter=state_setter,
-    )
+    if use_sim:
+        env = rlgym_sim.make(
+            tick_skip=tick_skip,
+            terminal_conditions=terminals,
+            team_size=(n_players // 2) if n_players > 1 else 1,
+            spawn_opponents=n_players > 1,
+            state_setter=state_setter,
+        )
+    else:
+        env = rlgym.make(
+            game_speed=100,
+            auto_minimize=True,
+            tick_skip=tick_skip,
+            terminal_conditions=terminals,
+            team_size=(n_players // 2) if n_players > 1 else 1,
+            spawn_opponents=n_players > 1,
+            state_setter=state_setter,
+        )
 
     total_steps = 0
     episode = 0
-    file_counter = 0
     states, actions, episodes = [], [], []
     it = tqdm()
-    while file_counter < 7 * 4:
+    while True:
         done = False
         obs, info = env.reset(return_info=True)
 
@@ -212,7 +149,7 @@ def main(tick_skip, timeout_seconds, mean_action_hold_steps, n_players, include_
         step_actions = [random_action() for _ in range(n_players)]
         while not done:
             if n == 0:
-                n = random_action_hold_duration(mean_action_hold_steps)
+                n = random_action_hold_duration(prob_continue_action)
                 step_actions = [mutate_action(a) for a in step_actions]
 
             state = info["state"]
@@ -226,6 +163,7 @@ def main(tick_skip, timeout_seconds, mean_action_hold_steps, n_players, include_
             n -= 1
 
         if n_players * len(states) > 30 * 60 * 60 * 24:
+            file_counter = len(os.listdir(output_folder))
             states = np.vstack(states)
             actions = np.vstack(actions)
             episodes = np.array(episodes)
@@ -233,7 +171,6 @@ def main(tick_skip, timeout_seconds, mean_action_hold_steps, n_players, include_
             np.savez_compressed(os.path.join(output_folder, f"states-actions-episodes-{file_counter}.npz"),
                                 states=states, actions=actions, episodes=episodes)
             states, actions, episodes = [], [], []
-            file_counter += 1
         episode += 1
         it.update()
         it.set_postfix_str(f"total_states={total_steps + n_players * len(states)}, "
@@ -243,11 +180,12 @@ def main(tick_skip, timeout_seconds, mean_action_hold_steps, n_players, include_
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--tick_skip", type=int, default=4)
-    parser.add_argument("--timeout_seconds", type=float, default=10)
-    parser.add_argument("--mean_action_hold_steps", type=float, default=2)
+    parser.add_argument("--timeout_seconds", type=float, default=5)
+    parser.add_argument("--prob_continue_action", type=float, default=0.2)
     parser.add_argument("--n_players", type=int, default=6)
-    parser.add_argument("--include_ball", action="store_false")
+    parser.add_argument("--include_ball", action="store_true")
     parser.add_argument("--include_players", action="store_true")
+    parser.add_argument("--use_sim", action="store_true")
     parser.add_argument("--output_folder", default=r"E:\rokutleg\idm-states-actions")
 
     args = parser.parse_args()
@@ -255,9 +193,10 @@ if __name__ == '__main__':
     main(
         tick_skip=args.tick_skip,
         timeout_seconds=args.timeout_seconds,
-        mean_action_hold_steps=args.mean_action_hold_steps,
+        prob_continue_action=args.prob_continue_action,
         n_players=args.n_players,
         include_ball=args.include_ball,
         include_players=args.include_players,
-        output_folder=args.output_folder
+        use_sim=args.use_sim,
+        output_folder=args.output_folder,
     )

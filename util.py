@@ -4,6 +4,7 @@ from typing import List, Optional
 
 import numpy as np
 import torch.jit
+from numba import njit
 from rlgym.utils.common_values import BALL_RADIUS, BLUE_TEAM, CEILING_Z, BACK_WALL_Y
 from rlgym.utils.gamestates.game_state import GameState
 from torch import nn
@@ -132,18 +133,40 @@ def normalize_quadrant(features, label):
     transform[ang_cols] = np.tile(np.array([-1, 1, -1]), len(ang_cols) // 3)
     features[neg_y] *= transform
 
-    actions[mirrored] = mirror_map[actions[mirrored].astype(int)]
+    actions[mirrored] *= INVERT_SIDE_ACTIONS
 
     return mirrored
 
 
-def get_data(states: List["GameState"], actions: np.ndarray):
+def equivalent(player, action1, action2, threshold=0.):
+    if player.is_demoed:
+        return True
+    indices = []
+    if player.on_ground and (player.car_data.linear_velocity != 0).any():
+        indices += [0, 1, 7]
+    else:
+        indices += [0, 2, 3, 4]
+    if player.has_flip or player.has_jump:
+        indices += [5]
+    if player.boost_amount > 0:
+        indices += [6]
+    indices = sorted(indices)
+    return np.linalg.norm(action1[indices] - action2[indices]) <= threshold
+
+
+def get_data(states: List["GameState"], actions: np.ndarray, action_options: int = 16):
     positions = np.array([[p.car_data.position for p in state.players] for state in states])
     for i in range(len(states[0].players)):
         x_data = np.zeros((len(states), 45))
-        y_data = (np.zeros((len(states), 8)),) + tuple(np.zeros(len(states)) for _ in range(3))
-        for j, state in enumerate(states):
+        y_data = ((np.zeros((len(states), 8)),
+                   np.zeros((len(states), action_options, 8)),
+                   np.zeros((len(states), action_options, 8))) +
+                  tuple(np.zeros(len(states)) for _ in range(3)))
+        j = 0
+        for state in states:
             player = state.players[i]
+            if player.is_demoed:
+                continue
             action = actions[j][i]
 
             features = np.zeros(45)
@@ -174,11 +197,33 @@ def get_data(states: List["GameState"], actions: np.ndarray):
                 features[41:44] = p.car_data.angular_velocity * ANG_NORM
                 features[44] = p.boost_amount
 
+            random_actions = np.zeros((action_options, 8))
+            for k in range(action_options):
+                while True:
+                    act = random_action()
+                    if not equivalent(player, action, act, 0.25):
+                        break
+                random_actions[k] = act
+            mutated_actions = np.zeros((action_options, 8))
+            for k in range(action_options):
+                while True:
+                    act = mutate_action(action)
+                    if not equivalent(player, action, act, 0.25):
+                        break
+                mutated_actions[k] = act
+
             x_data[j] = features
             y_data[0][j] = action
-            y_data[1][j] = player.on_ground
-            y_data[2][j] = player.has_jump
-            y_data[3][j] = player.has_flip
+            y_data[1][j] = random_actions
+            y_data[2][j] = mutated_actions
+            y_data[3][j] = player.on_ground
+            y_data[4][j] = player.has_jump
+            y_data[5][j] = player.has_flip
+            j += 1
+
+        # Cut off invalid data
+        x_data = x_data[:j]
+        y_data = tuple(y[:j] for y in y_data)
         yield x_data, y_data
 
 
@@ -289,7 +334,7 @@ def encoded_states_to_advanced_obs(df, actions):
 
 
 class ControlsPredictorDot(nn.Module):
-    def __init__(self, in_features, features=32, layers=1, actions=None):
+    def __init__(self, in_features, hidden_features, out_features=32, layers=1, actions=None):
         super().__init__()
         if actions is not None:
             self.actions = torch.from_numpy(actions).float()
@@ -297,11 +342,12 @@ class ControlsPredictorDot(nn.Module):
             self.actions = actions
         self.invert_side_actions = torch.from_numpy(INVERT_SIDE_ACTIONS).float()
         self.net = nn.Sequential(
-            nn.Linear(8, in_features),
-            *sum(([nn.ReLU(), nn.Linear(in_features, in_features)] for _ in range(layers)), []),
-            nn.Linear(in_features, features)
+            nn.Linear(8, hidden_features),
+            *sum(([nn.GELU(), nn.Linear(hidden_features, hidden_features)] for _ in range(layers)), []),
+            nn.GELU(),
+            nn.Linear(hidden_features, out_features)
         )
-        self.emb_convertor = nn.Linear(in_features, features)
+        self.emb_convertor = nn.Linear(in_features, out_features)
 
     def forward(self, player_emb: torch.Tensor, actions: Optional[torch.Tensor] = None, flip=None):
         if actions is None:
@@ -323,5 +369,74 @@ class ControlsPredictorDot(nn.Module):
         return torch.einsum("bad,bd->ba", act_emb, player_emb)
 
 
+class ControlsPredictorLinear(nn.Module):
+    def __init__(self, in_features, features=32, layers=1, actions=None):
+        super().__init__()
+        if actions is not None:
+            self.actions = torch.from_numpy(actions).float()
+        else:
+            self.actions = actions
+        self.invert_side_actions = torch.from_numpy(INVERT_SIDE_ACTIONS).float()
+        self.net = nn.Sequential(
+            nn.Linear(in_features + 8, features),
+            *sum(([nn.ReLU(), nn.Linear(features, features)] for _ in range(layers)), []),
+            nn.ReLU(),
+            nn.Linear(features, 1)
+        )
+
+    def forward(self, player_emb: torch.Tensor, actions: Optional[torch.Tensor] = None, flip=None):
+        if actions is None:
+            if self.actions is not None:
+                actions = self.actions
+            else:
+                raise ValueError("Need to supply action options")
+        actions = actions.to(player_emb.device)
+        if flip is not None:
+            if actions.ndim == 2:
+                actions = actions.unsqueeze(0).repeat(player_emb.shape[0], 1, 1)
+            actions[flip] *= self.invert_side_actions.to(player_emb.device)
+        player_emb = player_emb.unsqueeze(1).repeat(1, actions.shape[1], 1)
+
+        x = torch.cat((player_emb, actions), axis=2)
+
+        y = self.net(x)
+        return y.squeeze(2)
+
+
 idm_model = torch.jit.load("models/idm-model-icy-paper-137.pt").to("cuda" if torch.cuda.is_available() else "cpu")
 Replay = namedtuple("Replay", "metadata analyzer ball game players")
+
+
+def random_action():
+    a = np.zeros(8)
+    a = mutate_action(a, np.arange(8).astype(int))
+    return a
+
+
+@njit
+def mutate_action(a, indices=None):
+    a = np.copy(a)
+    if indices is None:
+        # indices = range(8)
+        indices = np.where(np.random.random(size=8) < 1 / 8)[0].astype(np.int32)
+    for i in indices:
+        if i < 5:
+            r = np.random.random()
+            cutoffs = [0.2 ** 2, 0.3 ** 2, 0.5 ** 2, 0.6 ** 2] if i == 0 else [0.2, 0.3, 0.7, 0.8]
+            if r < cutoffs[0]:
+                a[i] = -1
+            elif r < cutoffs[1]:
+                a[i] = -np.random.random()
+            elif r < cutoffs[2]:
+                a[i] = 0
+            elif r < cutoffs[3]:
+                a[i] = +np.random.random()
+            else:
+                a[i] = +1
+        elif i == 5:
+            a[5] = np.random.random() < 0.2
+        elif i == 6:
+            a[6] = np.random.random() < 0.2
+        elif i == 7:
+            a[7] = np.random.random() < 0.2
+    return a
