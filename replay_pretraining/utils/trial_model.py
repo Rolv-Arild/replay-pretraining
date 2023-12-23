@@ -146,7 +146,7 @@ if __name__ == '__main__':
     try:
         with torch.no_grad():
             while True:
-                models = [torch.jit.load(os.path.join("models", model_path)).cpu().eval()
+                models = [torch.jit.load(os.path.join("../../models", model_path)).cpu().eval()
                           for model_path in model_paths]
 
                 obs, info = env.reset(return_info=True)

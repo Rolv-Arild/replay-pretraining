@@ -459,7 +459,7 @@ def test_bc():
     test_dataset = BCDataset(r"D:\rokutleg\ssl-dataset-fixed", "test")
     model = torch.jit.load("bc-model.pt").cuda()
 
-    with open("bc-results.csv", "w") as f:
+    with open("../../bc-results.csv", "w") as f:
         f.write("action_pred,action_true\n")
         with torch.no_grad():
             model.eval()

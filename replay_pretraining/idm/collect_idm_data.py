@@ -14,7 +14,7 @@ from rlgym_tools.extra_state_setters.replay_setter import ReplaySetter
 from rlgym_tools.extra_state_setters.weighted_sample_setter import WeightedSampleSetter
 from tqdm import tqdm
 
-from util import random_action, mutate_action
+from replay_pretraining.utils.util import random_action, mutate_action
 
 X_MAX = 7000
 Y_MAX = 9000

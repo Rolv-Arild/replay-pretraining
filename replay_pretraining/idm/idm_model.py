@@ -1,179 +1,16 @@
-import os
+import argparse
 import random
-import time
-import zipfile
-from hashlib import md5
-from typing import Iterator
 
-import numba as numba
 import numpy as np
 import torch
-from rlgym.utils.gamestates import GameState
-from torch.optim.lr_scheduler import LambdaLR
 
 import wandb
 from torch import nn
 from torch.nn import functional as F
-from torch.utils.data import IterableDataset, DataLoader
-from torch.utils.data.dataset import T_co
+from torch.utils.data import DataLoader
 
-from util import get_data, rolling_window, normalize_quadrant, ControlsPredictorDot, ControlsPredictorLinear, \
-    random_action, mutate_action
-
-
-def make_idm_dataset(in_folder, out_folder, shard_size=60 * 60 * 30):
-    train = [[], 0, "train"]
-    validation = [[], 0, "validation"]
-    test = [[], 0, "test"]
-    window_size = 38
-    for file in os.listdir(in_folder):
-        file_idx = int(file.replace("states-actions-episodes-", "").replace(".npz", ""))
-
-        path = os.path.join(in_folder, file)
-        f = np.load(path)
-        all_states = f["states"]
-        all_episodes = f["episodes"]
-        all_actions = f["actions"].reshape(-1, 6, 8)
-        for episode in np.unique(all_episodes):
-            mask = all_episodes == episode
-
-            s = hash(f"{file}{episode}")
-
-            if s % 100 < 90:
-                arrs = train
-            elif s % 100 < 95:
-                arrs = validation
-            else:
-                arrs = test
-
-            states = all_states[mask]
-
-            pad = False  # episode % 7 == 0
-
-            states = [GameState(arr.tolist()) for arr in states]
-            actions = all_actions[mask]
-
-            for x, y in get_data(states, actions):
-                if not pad and len(x) < 2 * window_size + 1:
-                    continue
-                window = rolling_window(np.arange(len(x)), 2 * window_size + 1, pad_start=pad, pad_end=pad)
-                grouped_x = x[window]
-                grouped_y = tuple(y[i][window[:, window_size]] for i in range(len(y)))
-                normalize_quadrant(grouped_x, grouped_y)
-                assert grouped_y[0].max() <= 1
-
-                arrs[0].append((grouped_x, grouped_y))
-                if sum(len(gx) for gx, gy in arrs[0]) > shard_size:
-                    x_data = np.concatenate([gx for gx, gy in arrs[0]])
-                    y_data = tuple(np.concatenate([gy[i] for gx, gy in arrs[0]])
-                                   for i in range(len(arrs[0][0][1])))
-                    out_name = f"{arrs[2]}-shard-{arrs[1]}.npz"
-                    print(f"{out_name} ({len(x_data)})")
-                    np.savez_compressed(os.path.join(out_folder, out_name), features=x_data,
-                                        actions=y_data[0], random_actions=y_data[1], mutated_actions=y_data[2],
-                                        on_ground=y_data[3], has_jump=y_data[4], has_flip=y_data[5])
-                    arrs[1] += 1
-                    arrs[0].clear()
-
-
-@numba.njit
-def corrupted_indices(k, n):
-    indices = np.zeros((k, n))
-    for j in range(k):
-        i = 0
-        while i < n:
-            r = np.random.random()
-            if r < 0.15:
-                repeats = 1  # 15%
-            elif r < 0.65:
-                repeats = 2  # 50%
-            else:
-                repeats = 3  # 35%
-            indices[j, i:i + repeats] = i
-            i += repeats
-    return indices
-
-
-class IDMDataset(IterableDataset):
-    def __init__(self, folder, key="train", limit=None, num_action_options=10, corrupt=True, use_center_diff=True,
-                 mutate_action=False, shuffle=True):
-        self.folder = folder
-        self.key = key
-        self.limit = limit
-        self.num_action_options = num_action_options
-        self.corrupt = corrupt
-        self.use_center_diff = use_center_diff
-        self.mutate_action = mutate_action
-        self.shuffle = shuffle
-
-    def __iter__(self) -> Iterator[T_co]:
-        files = [file for file in os.listdir(self.folder) if self.key in file]
-        files = sorted(files, key=lambda x: int(x.split("-")[-1].split(".")[0]))
-        files = files[:self.limit]
-
-        random.shuffle(files)
-        for file in files:
-            path = os.path.join(self.folder, file)
-
-            rng = np.random if self.shuffle else np.random.RandomState(int(file.split("-")[-1].split(".")[0]))
-
-            try:
-                f = np.load(path)
-
-                features = f["features"]
-                actions = f["actions"]
-                random_actions = f["random_actions"]
-                mutated_actions = f["mutated_actions"]
-                on_ground = f["on_ground"]
-                has_jump = f["has_jump"]
-                has_flip = f["has_flip"]
-            except zipfile.BadZipFile:
-                continue
-
-            # print(f"Stats (n={n})")
-            # print(features.min(), features.mean(), features.max())
-            # print(actions.min(), actions.mean(), actions.max())
-            # print(on_ground.min(), on_ground.mean(), on_ground.max())
-            # print(has_jump.min(), has_jump.mean(), has_jump.max())
-            # print(has_flip.min(), has_flip.mean(), has_flip.max())
-
-            indices = rng.permutation(features.shape[0]) if self.shuffle else np.arange(features.shape[0])
-
-            features = features[indices]
-            actions = actions[indices]
-            on_ground = on_ground[indices]
-            has_jump = has_jump[indices]
-            has_flip = has_flip[indices]
-
-            action_options = np.repeat(np.expand_dims(actions, axis=1), self.num_action_options, axis=1)
-            action_indices = np.zeros(action_options.shape[0])
-            action_options[:, 0] = actions
-            action_population = mutated_actions if self.mutate_action else random_actions
-
-            if self.shuffle:
-                # There might be more available actions than num_action_options, so we select a random subset for each
-                action_population = action_population.swapaxes(0, 1)
-                rng.shuffle(action_population)
-                action_population = action_population.swapaxes(0, 1)
-                action_options[:, 1:] = action_population[:, :self.num_action_options - 1]
-            else:
-                action_options[:, 1:] = action_population[:, :self.num_action_options - 1]
-
-            if self.corrupt:
-                corrupt_mask = rng.random(features.shape[0]) < 0.5
-                feat_corr = features[corrupt_mask]
-                ind = corrupted_indices(feat_corr.shape[0], feat_corr.shape[1]).astype(int)
-                feat_corr = feat_corr[np.tile(np.arange(feat_corr.shape[0]), (feat_corr.shape[1], 1)).T, ind]
-                features[corrupt_mask] = feat_corr
-
-            if self.use_center_diff:
-                # Make features the difference from the central frame
-                mid = features.shape[1] // 2
-                features[:, np.r_[0:mid, mid + 1:features.shape[1]]] -= features[:, mid:mid + 1]
-
-            for i in range(features.shape[0]):
-                yield (features[i][..., :16], action_options[i]), (
-                    action_indices[i], on_ground[i], has_jump[i], has_flip[i])
+from idm_dataset import IDMDataset
+from replay_pretraining.utils.util import ControlsPredictorDot
 
 
 class IDMNet(nn.Module):
@@ -216,25 +53,15 @@ def collate(batch):
             tuple(torch.from_numpy(np.stack(y[i])).long() for i in range(len(y))))
 
 
-def train_idm():
+def train_idm(dataset_location, ff_dim, hidden_layers, dropout_rate, lr, batch_size, epochs):
     assert torch.cuda.is_available()
     output_names = ["action", "on_ground", "has_jump", "has_flip"]
-    train_dataset = IDMDataset(r"D:\rokutleg\idm-dataset", "train", mutate_action=True)
-    val_dataset = IDMDataset(r"D:\rokutleg\idm-dataset", "validation", limit=1, shuffle=False, corrupt=False)
-
-    ff_dim = 2048
-    hidden_layers = 6
-    dropout_rate = 0.
-    lr = 5e-5
-    batch_size = 300
+    train_dataset = IDMDataset(dataset_location, "train", mutate_action=True)
+    val_dataset = IDMDataset(dataset_location, "validation", limit=1, shuffle=False, corrupt=False)
 
     model = IDMNet(ff_dim, hidden_layers, dropout_rate)
-    # lr *= np.sqrt(sum(p.numel() for p in model.parameters())) / 5
     print(model)
     model.cuda()
-    # res = model.cuda()(torch.zeros(10, 77, 45).cuda(), torch.zeros(10, 9, 8).cuda())
-    # model.cpu()
-    # model = torch.jit.trace(model, (torch.zeros(10, 77, 45), torch.zeros(10, 9, 8))).cuda()
     print(f"Model has {sum(p.numel() for p in model.parameters() if p.requires_grad)} parameters")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr)
@@ -262,7 +89,7 @@ def train_idm():
     l2_norm = 0
     model_mag = 0
     update_size = 0
-    for epoch in range(100):
+    for epoch in range(epochs):
         model.train()
         train_loader = DataLoader(train_dataset, batch_size, collate_fn=collate, drop_last=True)
         for x_train, y_train in train_loader:
@@ -364,8 +191,26 @@ def seed_everything(seed):
 
 
 if __name__ == '__main__':
-    seed_everything(123)
+    parser = argparse.ArgumentParser()
 
-    # make_idm_dataset(r"E:\rokutleg\idm-states-actions", r"D:\rokutleg\idm-dataset")
-    train_idm()
-    # test_idm()
+    parser.add_argument("--dataset_location", type=str, required=True)
+    parser.add_argument("--seed", type=int, default=123)
+    parser.add_argument("--ff_dim", type=int, default=1024)
+    parser.add_argument("--hidden_layers", type=int, default=6)
+    parser.add_argument("--dropout_rate", type=float, default=0.0)
+    parser.add_argument("--lr", type=float, default=5e-5)
+    parser.add_argument("--batch_size", type=int, default=300)
+    parser.add_argument("--epochs", type=int, default=100)
+
+    args = parser.parse_args()
+
+    seed_everything(args.seed)
+    train_idm(
+        dataset_location=args.dataset_location,
+        ff_dim=args.ff_dim,
+        hidden_layers=args.hidden_layers,
+        dropout_rate=args.dropout_rate,
+        lr=args.lr,
+        batch_size=args.batch_size,
+        epochs=args.epochs
+    )
