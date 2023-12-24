@@ -2,11 +2,10 @@ import argparse
 import os
 
 import numpy as np
-import rlgym
 import rlgym_sim
-from rlgym.utils.state_setters import RandomState
-from rlgym.utils.state_setters import StateSetter
-from rlgym.utils.state_setters import StateWrapper
+from rlgym_sim.utils.state_setters import RandomState
+from rlgym_sim.utils.state_setters import StateSetter
+from rlgym_sim.utils.state_setters import StateWrapper
 from rlgym_sim.utils import TerminalCondition
 from rlgym_sim.utils.gamestates import GameState
 from rlgym_sim.utils.terminal_conditions.common_conditions import TimeoutCondition
@@ -127,6 +126,7 @@ def main(tick_skip, timeout_seconds, prob_continue_action, n_players, include_ba
             state_setter=state_setter,
         )
     else:
+        import rlgym
         env = rlgym.make(
             game_speed=100,
             auto_minimize=True,

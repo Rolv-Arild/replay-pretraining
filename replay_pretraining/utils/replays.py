@@ -6,8 +6,8 @@ import pandas as pd
 
 import numpy as np
 import torch
-from rlgym.utils.common_values import BOOST_LOCATIONS, BALL_RADIUS
-from rlgym.utils.gamestates import GameState
+from rlgym_sim.utils.common_values import BOOST_LOCATIONS, BALL_RADIUS
+from rlgym_sim.utils.gamestates import GameState
 
 from util import get_data, rolling_window, make_lookup_table, normalize_quadrant, mirror_map, LIN_NORM, ANG_NORM, \
     quats_to_rot_mtx, idm_model, Replay, lookup_table

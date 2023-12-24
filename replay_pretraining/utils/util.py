@@ -5,8 +5,8 @@ from typing import List, Optional
 import numpy as np
 import torch.jit
 from numba import njit
-from rlgym.utils.common_values import BALL_RADIUS, BLUE_TEAM, CEILING_Z, BACK_WALL_Y
-from rlgym.utils.gamestates.game_state import GameState
+from rlgym_sim.utils.common_values import BALL_RADIUS, BLUE_TEAM, CEILING_Z, BACK_WALL_Y
+from rlgym_sim.utils.gamestates.game_state import GameState
 from torch import nn
 
 INVERT_SIDE_ACTIONS = np.array([1, -1, 1, -1, -1, 1, 1, 1])
@@ -240,7 +240,7 @@ def rolling_window(a, window, pad_start=False, pad_end=False):
 
 
 def quats_to_rot_mtx(quats: np.ndarray) -> np.ndarray:
-    # From rlgym.utils.math.quat_to_rot_mtx
+    # from rlgym_sim.utils.math.quat_to_rot_mtx
     w = -quats[:, 0]
     x = -quats[:, 1]
     y = -quats[:, 2]

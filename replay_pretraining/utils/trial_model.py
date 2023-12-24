@@ -6,11 +6,11 @@ from typing import List, Any
 import numpy as np
 import rlgym
 import torch.jit
-from rlgym.utils import ObsBuilder, common_values, StateSetter
-from rlgym.utils.common_values import BOOST_LOCATIONS
-from rlgym.utils.gamestates import GameState, PlayerData, PhysicsObject
-from rlgym.utils.state_setters import StateWrapper, DefaultState
-from rlgym.utils.terminal_conditions.common_conditions import TimeoutCondition, GoalScoredCondition
+from rlgym_sim.utils import ObsBuilder, common_values, StateSetter
+from rlgym_sim.utils.common_values import BOOST_LOCATIONS
+from rlgym_sim.utils.gamestates import GameState, PlayerData, PhysicsObject
+from rlgym_sim.utils.state_setters import StateWrapper, DefaultState
+from rlgym_sim.utils.terminal_conditions.common_conditions import TimeoutCondition, GoalScoredCondition
 from rlgym_tools.extra_state_setters.replay_setter import ReplaySetter
 from torch.distributions import Categorical
 
