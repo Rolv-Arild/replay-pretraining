@@ -8,10 +8,10 @@ from typing import Iterator
 
 import numba as numba
 import numpy as np
-from rlgym.utils.gamestates import GameState
 from torch.utils.data import IterableDataset
 from torch.utils.data.dataset import T_co
 
+from replay_pretraining.utils.game_state import GameState
 from replay_pretraining.utils.util import get_data, rolling_window, normalize_quadrant
 
 
