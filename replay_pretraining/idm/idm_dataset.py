@@ -8,7 +8,7 @@ from typing import Iterator
 
 import numba as numba
 import numpy as np
-from rlgym_sim.utils.gamestates import GameState
+from rlgym.utils.gamestates import GameState
 from torch.utils.data import IterableDataset
 from torch.utils.data.dataset import T_co
 
