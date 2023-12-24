@@ -413,7 +413,7 @@ def random_action():
     return a
 
 
-@njit
+# @njit
 def mutate_action(a, indices=None):
     a = np.copy(a)
     if indices is None:
