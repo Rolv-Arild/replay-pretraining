@@ -160,21 +160,22 @@ def make_idm_dataset(in_folder, out_folder, shard_size=60 * 60 * 30, workers=1):
     window_size = 38
     paths = [os.path.join(in_folder, file) for file in os.listdir(in_folder)]
     for path in paths:
-        result = process_file(path, window_size, workers)
-        for x, y in result:
-            split = splits[np.random.choice(len(splits), p=[0.98, 0.01, 0.01])]
-            split[0].append((x, y))
-            if sum(len(gx) for gx, gy in split[0]) > shard_size:
-                x_data = np.concatenate([gx for gx, gy in split[0]])
-                y_data = tuple(np.concatenate([gy[i] for gx, gy in split[0]])
-                               for i in range(len(split[0][0][1])))
-                out_name = f"{split[2]}-shard-{split[1]}.npz"
-                print(f"{out_name} ({len(x_data)})")
-                np.savez_compressed(os.path.join(out_folder, out_name), features=x_data,
-                                    actions=y_data[0], random_actions=y_data[1], mutated_actions=y_data[2],
-                                    on_ground=y_data[3], has_jump=y_data[4], has_flip=y_data[5])
-                split[1] += 1
-                split[0].clear()
+        results = process_file(path, window_size, workers)
+        for result in results:
+            for x, y in result:
+                split = splits[np.random.choice(len(splits), p=[0.98, 0.01, 0.01])]
+                split[0].append((x, y))
+                if sum(len(gx) for gx, gy in split[0]) > shard_size:
+                    x_data = np.concatenate([gx for gx, gy in split[0]])
+                    y_data = tuple(np.concatenate([gy[i] for gx, gy in split[0]])
+                                   for i in range(len(split[0][0][1])))
+                    out_name = f"{split[2]}-shard-{split[1]}.npz"
+                    print(f"{out_name} ({len(x_data)})")
+                    np.savez_compressed(os.path.join(out_folder, out_name), features=x_data,
+                                        actions=y_data[0], random_actions=y_data[1], mutated_actions=y_data[2],
+                                        on_ground=y_data[3], has_jump=y_data[4], has_flip=y_data[5])
+                    split[1] += 1
+                    split[0].clear()
 
 
 if __name__ == '__main__':
