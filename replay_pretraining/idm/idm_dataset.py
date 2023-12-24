@@ -151,10 +151,10 @@ def make_idm_dataset(in_folder, out_folder, shard_size=60 * 60 * 30, workers=1):
     splits = [train, validation, test]
     window_size = 38
     with ProcessPoolExecutor(max_workers=workers) as executor:
-        paths = [os.path.join(in_folder, file) for file in os.listdir(in_folder) if "train" in file]
+        paths = [os.path.join(in_folder, file) for file in os.listdir(in_folder)]
         for result in executor.map(partial(process_file, window_size=window_size), paths):
             for x, y in result:
-                split = splits[np.random.choice(len(splits), p=[0.8, 0.1, 0.1])]
+                split = splits[np.random.choice(len(splits), p=[0.98, 0.01, 0.01])]
                 split[0].append((x, y))
                 if sum(len(gx) for gx, gy in split[0]) > shard_size:
                     x_data = np.concatenate([gx for gx, gy in split[0]])
