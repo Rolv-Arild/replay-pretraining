@@ -171,8 +171,8 @@ def make_idm_dataset(in_folder, out_folder, shard_size=60 * 60 * 30, workers=1):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument("--in_folder")
-    parser.add_argument("--out_folder")
+    parser.add_argument("--in_folder", required=True)
+    parser.add_argument("--out_folder", required=True)
     parser.add_argument("--shard_size", type=int, default=60 * 60 * 30)
     parser.add_argument("--workers", type=int, default=1)
 
