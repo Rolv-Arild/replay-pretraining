@@ -115,33 +115,41 @@ class IDMDataset(IterableDataset):
                     action_indices[i], on_ground[i], has_jump[i], has_flip[i])
 
 
-def process_file(path, window_size=38):
+def process_episode(states, actions, window_size=38):
+    states = [GameState(arr.tolist()) for arr in states]
+
+    pad = False
+
+    result = []
+    for x, y in get_data(states, actions):
+        if not pad and len(x) < 2 * window_size + 1:
+            continue
+        window = rolling_window(np.arange(len(x)), 2 * window_size + 1, pad_start=pad, pad_end=pad)
+        grouped_x = x[window]
+        grouped_y = tuple(y[i][window[:, window_size]] for i in range(len(y)))
+        normalize_quadrant(grouped_x, grouped_y)
+        assert grouped_y[0].max() <= 1
+
+        result.append((grouped_x, grouped_y))
+    return result
+
+
+def process_file(path, window_size=38, workers=1):
     f = np.load(path)
     all_states = f["states"]
     all_episodes = f["episodes"]
     all_actions = f["actions"].reshape(-1, 6, 8)
-    results = []
-    for episode in np.unique(all_episodes):
-        mask = all_episodes == episode
+    futures = []
+    with ProcessPoolExecutor(workers) as ex:
+        for episode in np.unique(all_episodes):
+            mask = all_episodes == episode
 
-        states = all_states[mask]
+            states = all_states[mask]
+            actions = all_actions[mask]
 
-        pad = False  # episode % 7 == 0
-
-        states = [GameState(arr.tolist()) for arr in states]
-        actions = all_actions[mask]
-
-        for x, y in get_data(states, actions):
-            if not pad and len(x) < 2 * window_size + 1:
-                continue
-            window = rolling_window(np.arange(len(x)), 2 * window_size + 1, pad_start=pad, pad_end=pad)
-            grouped_x = x[window]
-            grouped_y = tuple(y[i][window[:, window_size]] for i in range(len(y)))
-            normalize_quadrant(grouped_x, grouped_y)
-            assert grouped_y[0].max() <= 1
-
-            results.append((grouped_x, grouped_y))
-    return results
+            future = ex.submit(process_episode, states, actions, window_size)
+            futures.append(future)
+    return [f.result() for f in futures]
 
 
 def make_idm_dataset(in_folder, out_folder, shard_size=60 * 60 * 30, workers=1):
@@ -150,23 +158,23 @@ def make_idm_dataset(in_folder, out_folder, shard_size=60 * 60 * 30, workers=1):
     test = [[], 0, "test"]
     splits = [train, validation, test]
     window_size = 38
-    with ProcessPoolExecutor(max_workers=workers) as executor:
-        paths = [os.path.join(in_folder, file) for file in os.listdir(in_folder)]
-        for result in executor.map(partial(process_file, window_size=window_size), paths):
-            for x, y in result:
-                split = splits[np.random.choice(len(splits), p=[0.98, 0.01, 0.01])]
-                split[0].append((x, y))
-                if sum(len(gx) for gx, gy in split[0]) > shard_size:
-                    x_data = np.concatenate([gx for gx, gy in split[0]])
-                    y_data = tuple(np.concatenate([gy[i] for gx, gy in split[0]])
-                                   for i in range(len(split[0][0][1])))
-                    out_name = f"{split[2]}-shard-{split[1]}.npz"
-                    print(f"{out_name} ({len(x_data)})")
-                    np.savez_compressed(os.path.join(out_folder, out_name), features=x_data,
-                                        actions=y_data[0], random_actions=y_data[1], mutated_actions=y_data[2],
-                                        on_ground=y_data[3], has_jump=y_data[4], has_flip=y_data[5])
-                    split[1] += 1
-                    split[0].clear()
+    paths = [os.path.join(in_folder, file) for file in os.listdir(in_folder)]
+    for path in paths:
+        result = process_file(path, window_size, workers)
+        for x, y in result:
+            split = splits[np.random.choice(len(splits), p=[0.98, 0.01, 0.01])]
+            split[0].append((x, y))
+            if sum(len(gx) for gx, gy in split[0]) > shard_size:
+                x_data = np.concatenate([gx for gx, gy in split[0]])
+                y_data = tuple(np.concatenate([gy[i] for gx, gy in split[0]])
+                               for i in range(len(split[0][0][1])))
+                out_name = f"{split[2]}-shard-{split[1]}.npz"
+                print(f"{out_name} ({len(x_data)})")
+                np.savez_compressed(os.path.join(out_folder, out_name), features=x_data,
+                                    actions=y_data[0], random_actions=y_data[1], mutated_actions=y_data[2],
+                                    on_ground=y_data[3], has_jump=y_data[4], has_flip=y_data[5])
+                split[1] += 1
+                split[0].clear()
 
 
 if __name__ == '__main__':
