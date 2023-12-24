@@ -403,7 +403,7 @@ class ControlsPredictorLinear(nn.Module):
         return y.squeeze(2)
 
 
-idm_model = torch.jit.load("models/idm-model-icy-paper-137.pt").to("cuda" if torch.cuda.is_available() else "cpu")
+# idm_model = torch.jit.load("models/idm-model-icy-paper-137.pt").to("cuda" if torch.cuda.is_available() else "cpu")
 Replay = namedtuple("Replay", "metadata analyzer ball game players")
 
 
