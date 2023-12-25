@@ -135,20 +135,23 @@ def process_episode(states, actions, window_size=38):
 
 
 def process_file(path, window_size=38, workers=1):
-    f = np.load(path)
-    all_states = f["states"]
-    all_episodes = f["episodes"]
-    all_actions = f["actions"].reshape(-1, 6, 8)
-    futures = []
-    with ProcessPoolExecutor(workers) as ex:
-        for episode in np.unique(all_episodes):
-            mask = all_episodes == episode
+    try:
+        f = np.load(path)
+        all_states = f["states"]
+        all_episodes = f["episodes"]
+        all_actions = f["actions"].reshape(-1, 6, 8)
+        futures = []
+        with ProcessPoolExecutor(workers) as ex:
+            for episode in np.unique(all_episodes):
+                mask = all_episodes == episode
 
-            states = all_states[mask]
-            actions = all_actions[mask]
+                states = all_states[mask]
+                actions = all_actions[mask]
 
-            future = ex.submit(process_episode, states, actions, window_size)
-            futures.append(future)
+                future = ex.submit(process_episode, states, actions, window_size)
+                futures.append(future)
+    except zipfile.BadZipFile:
+        return []
     return [f.result() for f in futures]
 
 
