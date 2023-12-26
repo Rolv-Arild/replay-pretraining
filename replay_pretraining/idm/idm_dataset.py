@@ -150,7 +150,7 @@ def process_file(path, window_size=38, workers=1):
 
                 future = ex.submit(process_episode, states, actions, window_size)
                 futures.append(future)
-    except zipfile.BadZipFile:
+    except (zipfile.BadZipFile, EOFError):
         return []
     return [f.result() for f in futures]
 
