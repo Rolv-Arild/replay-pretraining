@@ -9,8 +9,8 @@ import torch
 from rlgym_sim.utils.common_values import BOOST_LOCATIONS, BALL_RADIUS
 from rlgym_sim.utils.gamestates import GameState
 
-from util import get_data, rolling_window, make_lookup_table, normalize_quadrant, mirror_map, LIN_NORM, ANG_NORM, \
-    quats_to_rot_mtx, idm_model, Replay, lookup_table
+from .util import get_data, rolling_window, make_lookup_table, normalize_quadrant, mirror_map, LIN_NORM, ANG_NORM, \
+    quats_to_rot_mtx, Replay, lookup_table
 
 
 def get_data_df(df: pd.DataFrame, actions: np.ndarray):

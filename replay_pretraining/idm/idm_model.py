@@ -53,10 +53,10 @@ def collate(batch):
             tuple(torch.from_numpy(np.stack(y[i])).long() for i in range(len(y))))
 
 
-def train_idm(dataset_location, ff_dim, hidden_layers, dropout_rate, lr, batch_size, epochs):
+def train_idm(dataset_location, mutate_train_actions, ff_dim, hidden_layers, dropout_rate, lr, batch_size, epochs):
     assert torch.cuda.is_available()
     output_names = ["action", "on_ground", "has_jump", "has_flip"]
-    train_dataset = IDMDataset(dataset_location, "train", mutate_action=True)
+    train_dataset = IDMDataset(dataset_location, "train", mutate_action=mutate_train_actions)
     val_dataset = IDMDataset(dataset_location, "validation", limit=1, shuffle=False, corrupt=False)
 
     model = IDMNet(ff_dim, hidden_layers, dropout_rate)
@@ -71,6 +71,7 @@ def train_idm(dataset_location, ff_dim, hidden_layers, dropout_rate, lr, batch_s
     logger = wandb.init(group="idm", project="replay-model", entity="rolv-arild",
                         config=dict(ff_dim=ff_dim, hidden_layers=hidden_layers,
                                     dropout_rate=dropout_rate, lr=lr, batch_size=batch_size,
+                                    mutate_train_actions=mutate_train_actions,
                                     optimizer=type(optimizer).__name__, lr_schedule=scheduler is not None))
 
     min_loss = float("inf")
@@ -194,6 +195,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--dataset_location", type=str, required=True)
+    parser.add_argument("--mutate_train_actions", action="store_true")
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--ff_dim", type=int, default=1024)
     parser.add_argument("--hidden_layers", type=int, default=6)
@@ -207,6 +209,7 @@ if __name__ == '__main__':
     seed_everything(args.seed)
     train_idm(
         dataset_location=args.dataset_location,
+        mutate_train_actions=args.mutate_train_actions,
         ff_dim=args.ff_dim,
         hidden_layers=args.hidden_layers,
         dropout_rate=args.dropout_rate,
