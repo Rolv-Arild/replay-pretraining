@@ -7,9 +7,10 @@ import torch
 import wandb
 from torch import nn
 from torch.nn import functional as F
+from torch.optim.lr_scheduler import LambdaLR, ExponentialLR
 from torch.utils.data import DataLoader
 
-from idm_dataset import IDMDataset
+from replay_pretraining.idm.idm_dataset import IDMDataset
 from replay_pretraining.utils.util import ControlsPredictorDot
 
 
@@ -18,8 +19,9 @@ class IDMNet(nn.Module):
         super().__init__()
         # self.conv = nn.Conv1d(45, conv_channels, kernel_size=(41,), stride=(1,))
         self.lin0 = nn.Linear(77 * 16, ff_dim)
+        self.dropout0 = nn.Dropout(dropout_rate)
         self.hidden_layers = nn.ModuleList([nn.Linear(ff_dim, ff_dim) for _ in range(hidden_layers)])
-        self.dropout = nn.Dropout(dropout_rate)
+        self.dropouts = [nn.Dropout(dropout_rate) for _ in range(hidden_layers)]
 
         self.action_out = ControlsPredictorDot(ff_dim, ff_dim, ff_dim // 16, 2)
         self.on_ground_out = nn.Linear(ff_dim, 2)
@@ -29,10 +31,10 @@ class IDMNet(nn.Module):
     def forward(self, x: torch.Tensor, action_options: torch.Tensor):
         # x = self.conv(x.swapaxes(1, 2))
         x = self.lin0(torch.reshape(x, (x.shape[0], 77 * 16)))
-        x = F.gelu(self.dropout(x))
-        for hidden_layer in self.hidden_layers:
+        x = F.gelu(self.dropout0(x))
+        for hidden_layer, dropout in zip(self.hidden_layers, self.dropouts):
             x = hidden_layer(x)
-            x = F.gelu(self.dropout(x))
+            x = F.gelu(dropout(x))
         return (
             self.action_out(x, action_options),
             self.on_ground_out(x),
@@ -53,7 +55,8 @@ def collate(batch):
             tuple(torch.from_numpy(np.stack(y[i])).long() for i in range(len(y))))
 
 
-def train_idm(dataset_location, mutate_train_actions, ff_dim, hidden_layers, dropout_rate, lr, batch_size, epochs):
+def train_idm(dataset_location, mutate_train_actions, ff_dim, hidden_layers, dropout_rate, lr, lr_half_life, batch_size,
+              epochs):
     assert torch.cuda.is_available()
     output_names = ["action", "on_ground", "has_jump", "has_flip"]
     train_dataset = IDMDataset(dataset_location, "train", mutate_action=mutate_train_actions)
@@ -64,15 +67,16 @@ def train_idm(dataset_location, mutate_train_actions, ff_dim, hidden_layers, dro
     model.cuda()
     print(f"Model has {sum(p.numel() for p in model.parameters() if p.requires_grad)} parameters")
 
+    lr_decay = 0.5 ** (1 / lr_half_life)
     optimizer = torch.optim.AdamW(model.parameters(), lr)
     loss_fn = nn.CrossEntropyLoss(reduce=False)
-    scheduler = None  # LambdaLR(optimizer, lr_lambda=lambda e: 1 / (0.2 * e + 1))
+    scheduler = ExponentialLR(optimizer, lr_decay)
 
     logger = wandb.init(group="idm", project="replay-model", entity="rolv-arild",
                         config=dict(ff_dim=ff_dim, hidden_layers=hidden_layers,
                                     dropout_rate=dropout_rate, lr=lr, batch_size=batch_size,
                                     mutate_train_actions=mutate_train_actions,
-                                    optimizer=type(optimizer).__name__, lr_schedule=scheduler is not None))
+                                    optimizer=type(optimizer).__name__, lr_half_life=lr_half_life))
 
     min_loss = float("inf")
 
@@ -180,8 +184,7 @@ def train_idm(dataset_location, mutate_train_actions, ff_dim, hidden_layers, dro
                 l2_norm = 0
                 model_mag = 0
                 update_size = 0
-                if scheduler is not None:
-                    scheduler.step()
+            scheduler.step()
 
 
 def seed_everything(seed):
@@ -201,6 +204,7 @@ if __name__ == '__main__':
     parser.add_argument("--hidden_layers", type=int, default=6)
     parser.add_argument("--dropout_rate", type=float, default=0.0)
     parser.add_argument("--lr", type=float, default=5e-5)
+    parser.add_argument("--lr_half_life", type=float, default=float("inf"))
     parser.add_argument("--batch_size", type=int, default=300)
     parser.add_argument("--epochs", type=int, default=100)
 
@@ -214,6 +218,7 @@ if __name__ == '__main__':
         hidden_layers=args.hidden_layers,
         dropout_rate=args.dropout_rate,
         lr=args.lr,
+        lr_half_life=args.lr_half_life,
         batch_size=args.batch_size,
         epochs=args.epochs
     )

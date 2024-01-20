@@ -52,7 +52,7 @@ def find_rank_span(player_id, playlist):
 def get_replay_info(seasons):
     for season in seasons:
         all_ids = set()
-        with open(f"ranked-replays-season_{season}-ssl.ijson", "w") as info_file:
+        with (open(f"ranked-replays-season_{season}-ssl.ijson", "w") as info_file):
             start_date = next(api.get_replays(season=season, sort_by="replay-date", sort_dir="asc"))["date"]
             end_date = next(api.get_replays(season=season, sort_by="replay-date", sort_dir="desc"))["date"]
 
@@ -69,70 +69,72 @@ def get_replay_info(seasons):
                 # for rank_group in [bc.Rank.BRONZE, bc.Rank.SILVER, bc.Rank.GOLD, bc.Rank.PLATINUM, bc.Rank.DIAMOND,
                 #                    bc.Rank.CHAMPION, bc.Rank.GRAND_CHAMPION, (bc.Rank.SUPERSONIC_LEGEND,)][::-1]:
                 replay_candidates = []
-                for rank_group in [bc.Rank.GRAND_CHAMPION + (bc.Rank.SUPERSONIC_LEGEND,)]:
+                for rank_group in [bc.Rank.GRAND_CHAMPION + ("grand-champion", bc.Rank.SUPERSONIC_LEGEND,)]:
                     d = start_date
                     while d <= end_date:
+                        replays = list(api.get_replays(replay_after=d,
+                                                       replay_before=d + timedelta(1),
+                                                       season=season,
+                                                       min_rank=rank_group[0],
+                                                       max_rank=rank_group[-1],
+                                                       playlist=playlist,
+                                                       count=10_000))
+
                         n = 0
-                        for replay in api.get_replays(replay_after=d,
-                                                      replay_before=d + timedelta(1),
-                                                      min_rank=rank_group[0],
-                                                      max_rank=rank_group[-1],
-                                                      playlist=playlist,
-                                                      count=10_000):
-                            # if replay["max_rank"]["id"] != "supersonic-legend":
-                            #     continue
+                        for replay in replays:
                             if replay["playlist_id"] != playlist:
                                 continue
                             if replay["season"] != int(season.replace("f", "")):
                                 continue
                             if season.startswith("f") != replay["season_type"].startswith("f"):
                                 continue
-                            # if not replay["date"].startswith("2022"):
-                            #     continue
-                            if not (replay["min_rank"]["id"] in rank_group and replay["max_rank"]["id"] in rank_group):
+                            if replay["min_rank"]["id"] not in rank_group or \
+                                    replay["max_rank"]["id"] not in rank_group:
                                 continue
-                            if replay["id"] in all_ids:
+                            bc_id = replay["id"]
+                            rl_id = replay["rocket_league_id"]
+                            if bc_id in all_ids or rl_id in all_ids:
                                 continue
-
-                            all_ids.add(replay["id"])
-                            n += 1
+                            all_ids.add(bc_id)
+                            all_ids.add(rl_id)
 
                             replay_candidates.append(replay)
+                            n += 1
                         print(f"{playlist}\t{rank_group[0].replace('-1', '')}\t{str(d.date())}\t{n}")
                         d += timedelta(1)
 
-                    highest_recorded_rank = {}
-                    for replay in replay_candidates:
-                        for team in ("blue", "orange"):
-                            for player in replay[team].get("players", []):
-                                pid = (player["id"]["platform"], player["id"]["id"])
-                                if "rank" in player:
-                                    tier = player["rank"]["tier"]
-                                    div = player["rank"].get("division", 0)
-                                    rank = max(highest_recorded_rank.get(pid, (-1, -1)), (tier, div))
-                                    highest_recorded_rank[pid] = rank
+                highest_recorded_rank = {}
+                for replay in replay_candidates:
+                    for team in ("blue", "orange"):
+                        for player in replay[team].get("players", []):
+                            pid = (player["id"]["platform"], player["id"]["id"])
+                            if "rank" in player:
+                                tier = player["rank"]["tier"]
+                                div = player["rank"].get("division", 0)
+                                rank = max(highest_recorded_rank.get(pid, (-1, -1)), (tier, div))
+                                highest_recorded_rank[pid] = rank
 
-                    n = 0
-                    for replay in replay_candidates:
-                        ssl = 0
-                        total = 0
-                        for team in ("blue", "orange"):
-                            players = replay[team].get("players")
-                            if players is None:
-                                break
-                            for player in replay[team]["players"]:
-                                pid = (player["id"]["platform"], player["id"]["id"])
-                                rank = highest_recorded_rank.get(pid)
-                                if rank is not None and rank >= (22, 0):
-                                    ssl += 1
-                                total += 1
-                        else:
-                            if ssl < total:
-                                continue
+                n = 0
+                for replay in replay_candidates:
+                    ssl = 0
+                    total = 0
+                    for team in ("blue", "orange"):
+                        players = replay[team].get("players")
+                        if players is None:
+                            break
+                        for player in replay[team]["players"]:
+                            pid = (player["id"]["platform"], player["id"]["id"])
+                            rank = highest_recorded_rank.get(pid)
+                            if rank is not None and rank >= (22, 0):
+                                ssl += 1
+                            total += 1
+                    else:
+                        if ssl < total:
+                            continue
 
-                            info_file.write(json.dumps(replay) + "\n")
-                            n += 1
-                    accepted_replays[playlist] = n
+                        info_file.write(json.dumps(replay) + "\n")
+                        n += 1
+                accepted_replays[playlist] = n
             print(f"Total accepted replays: {accepted_replays}")
 
 
@@ -270,33 +272,12 @@ def filter_replays(season):
             if n >= limit:
                 break
 
-
-def download_electrum_replays():
-    with open("binned_replay_ids.json") as f:
-        bins = json.load(f)
-
-    progress = tqdm.tqdm(desc="Replay files", total=3 * (4000 + 12000))
-    folder = r"D:\rokutleg\replays\2022-electrum-replays"
-    for playlist in bins:
-        for rank in bins[playlist]:
-            if rank == "silver":
-                lim = 4000
-            elif rank == "gold":
-                lim = 12000
-            else:
-                continue
-            bin_folder = os.path.join(folder, playlist, rank)
-            os.makedirs(bin_folder, exist_ok=True)
-            n = 0
-            for replay_id in bins[playlist][rank]:
-                try:
-                    api.download_replay(replay_id, bin_folder)
-                    progress.update()
-                    n += 1
-                    if n >= lim:
-                        break
-                except ValueError:
-                    pass
+        # Add __ballchasing.ijson file
+        with open(f"{to_folder}/{playlist}/__ballchasing.ijson", "w") as f:
+            for fname in os.listdir(f"{to_folder}/{playlist}"):
+                if fname.endswith(".replay"):
+                    rid = fname.replace(".replay", "")
+                    f.write(json.dumps(replays[rid]) + "\n")
 
 
 def seconds_to_dhms(seconds):
@@ -360,10 +341,10 @@ def produce_ijson(folder):
 
 
 def main():
-    seasons = ["f9", "f10", "f11"]
+    seasons = ["f12"]
     for season in seasons:
         print(f"Processing season {season}")
-        # get_replay_info(["f9", "f10", "f11"])
+        get_replay_info([season])
         bin_replays(season)
         # download_replays()
         download_ssl_replays(season)

@@ -1,6 +1,6 @@
 import re
 from collections import namedtuple
-from typing import List, Optional
+from typing import List, Optional, Any
 
 import numpy as np
 import torch.jit
@@ -10,32 +10,78 @@ from rlgym_sim.utils.gamestates.game_state import GameState
 from torch import nn
 
 INVERT_SIDE_ACTIONS = np.array([1, -1, 1, -1, -1, 1, 1, 1])
+BUTTONS = ['throttle', 'steer', 'pitch', 'yaw', 'roll', 'jump', 'boost', 'handbrake']
 
 
-def make_lookup_table():
+def make_lookup_table(throttle_bins: Any = 3,
+                      steer_bins: Any = 3,
+                      torque_bins: Any = 3,
+                      flip_bins: Any = 8,
+                      include_stall=False):
+    # Parse bins
+    def parse_bin(b, endpoint=True):
+        if isinstance(b, int):
+            b = np.linspace(-1, 1, b, endpoint=endpoint)
+        else:
+            b = np.array(b)
+        return b
+
+    throttle_bins = parse_bin(throttle_bins)
+    steer_bins = parse_bin(steer_bins)
+    torque_bins = parse_bin(torque_bins)
+    flip_bins = (parse_bin(flip_bins, endpoint=False) + 1) * np.pi  # Split a circle into equal segments in [0, 2pi)
+
     actions = []
+
     # Ground
-    for throttle in (-1, 0, 1):
-        for steer in (-1, 0, 1):
+    pitch = roll = jump = 0
+    for throttle in throttle_bins:
+        for steer in steer_bins:
             for boost in (0, 1):
                 for handbrake in (0, 1):
                     if boost == 1 and throttle != 1:
                         continue
-                    actions.append([throttle or boost, steer, 0, steer, 0, 0, boost, handbrake])
+                    yaw = steer
+                    actions.append([throttle, steer, pitch, yaw, roll, jump, boost, handbrake])
+
     # Aerial
-    for pitch in (-1, 0, 1):
-        for yaw in (-1, 0, 1):
-            for roll in (-1, 0, 1):
-                for jump in (0, 1):
-                    for boost in (0, 1):
-                        if jump == 1 and yaw != 0:  # Only need roll for sideflip
-                            continue
-                        if pitch == roll == jump == 0:  # Duplicate with ground
-                            continue
-                        # Enable handbrake for potential wavedashes
-                        handbrake = jump == 1 and (pitch != 0 or yaw != 0 or roll != 0)
-                        actions.append([boost, yaw, pitch, yaw, roll, jump, boost, handbrake])
-    actions = np.array(actions)
+    jump = handbrake = 0
+    for pitch in torque_bins:
+        for yaw in torque_bins:
+            for roll in torque_bins:
+                if pitch == roll == 0 and np.isclose(yaw, steer_bins).any():
+                    continue  # Duplicate with ground
+                magnitude = max(abs(pitch), abs(yaw), abs(roll))
+                if magnitude < 1:
+                    continue  # Duplicate rotation direction, only keep max magnitude
+                for boost in (0, 1):
+                    throttle = boost
+                    steer = yaw
+                    actions.append([throttle, steer, pitch, yaw, roll, jump, boost, handbrake])
+
+    # Flips and jumps
+    jump = handbrake = 1  # Enable handbrake for potential wavedashes
+    yaw = steer = 0  # Only need roll for sideflip
+    angles = [np.nan] + [v for v in flip_bins]
+    for angle in angles:
+        if np.isnan(angle):
+            pitch = roll = 0  # Empty jump
+        else:
+            pitch = np.sin(angle)
+            roll = np.cos(angle)
+            # Project to square of diameter 2 because why not
+            magnitude = max(abs(pitch), abs(roll))
+            pitch /= magnitude
+            roll /= magnitude
+        for boost in (0, 1):
+            throttle = boost
+            actions.append([throttle, steer, pitch, yaw, roll, jump, boost, handbrake])
+    if include_stall:
+        actions.append([0, 0, 0, 1, -1, 1, 0, 1])  # One final action for stalling
+
+    actions = np.round(actions, 3)  # Convert to numpy and remove floating point errors
+    assert len(np.unique(actions, axis=0)) == len(actions), 'Duplicate actions found'
+
     return actions
 
 
@@ -138,20 +184,103 @@ def normalize_quadrant(features, label):
     return mirrored
 
 
-def equivalent(player, action1, action2, threshold=0.):
+# v is the magnitude of the velocity in the car's forward direction
+def curvature(v):
+    if 0.0 <= v < 500.0:
+        return 0.006900 - 5.84e-6 * v
+    if 500.0 <= v < 1000.0:
+        return 0.005610 - 3.26e-6 * v
+    if 1000.0 <= v < 1500.0:
+        return 0.004300 - 1.95e-6 * v
+    if 1500.0 <= v < 1750.0:
+        return 0.003025 - 1.1e-6 * v
+    if 1750.0 <= v < 2500.0:
+        return 0.001800 - 4e-7 * v
+
+    return 0.0
+
+
+def equivalent(player, true_action, alt_action, threshold=0.):
     if player.is_demoed:
         return True
-    indices = []
-    if player.on_ground and (player.car_data.linear_velocity != 0).any():
-        indices += [0, 1, 7]
-    else:
-        indices += [0, 2, 3, 4]
-    if player.has_flip or player.has_jump:
-        indices += [5]
-    if player.boost_amount > 0:
-        indices += [6]
-    indices = sorted(indices)
-    return np.linalg.norm(action1[indices] - action2[indices]) <= threshold
+
+    assert 0 <= threshold <= 1
+
+    true_linear_acceleration = np.zeros(3)
+    true_angular_acceleration = np.zeros(3)
+    alt_linear_acceleration = np.zeros(3)
+    alt_angular_acceleration = np.zeros(3)
+
+    for action, lin_acc, ang_acc in ((true_action, true_linear_acceleration, true_angular_acceleration),
+                                     (alt_action, alt_linear_acceleration, alt_angular_acceleration)):
+        throttle, steer, pitch, yaw, roll, jump, boost, handbrake = action
+
+        # Throttle
+        if boost > 0 and player.boost_amount > 0:
+            throttle = 1
+        forward_speed = player.car_data.linear_velocity @ player.car_data.forward()
+        if player.on_ground:
+            if forward_speed * throttle < 0:
+                acc = -3500  # Braking, e.g. accelerating in the opposite direction
+            elif abs(throttle) < 0.01 and forward_speed != 0:
+                acc = -525  # Coasting deceleration
+            else:
+                abs_fs = abs(forward_speed)
+                if abs_fs <= 1400:
+                    acc = 1600 - abs_fs * (1600 - 160) / 1400
+                elif abs_fs <= 1410:
+                    acc = 160 - (abs_fs - 1400) * (160 - 0) / 10
+                else:
+                    acc = 0
+                acc *= throttle
+        else:
+            acc = 66.667 * throttle if throttle >= 0 else 33.334 * throttle
+        lin_acc += acc * player.car_data.forward()
+
+        # Steer
+        if player.on_ground:
+            is_still = (true_action[0] == 0) and (player.car_data.linear_velocity == 0).all()
+            if not is_still:
+                forward_speed += lin_acc @ player.car_data.forward() / 2
+                c = curvature(abs(forward_speed))
+                turn_radius = 1 / c
+
+        # Pitch, yaw, roll
+        if not player.on_ground:
+            if (player.has_flip or player.has_jump
+                    and true_action[5] == 1 and abs(true_action[2:5]).sum() > 0.5
+                    and alt_action[5] == 1 and abs(alt_action[2:5]).sum() > 0.5):
+                dx = dy = 0
+                dz = -player.car_data.linear_velocity[2]  # Cancel vertical velocity
+                if true_action[3] == -true_action[4] and true_action[2] == 0:
+                    pass  # Stall
+                else:
+                    # Only direction matters
+                    flip_dir = true_action[2:5] / np.linalg.norm(true_action[2:5])
+                    dx
+                lin_acc += np.array([0, 0, ])  # Cancel vertical velocity
+            else:
+                pitch_acc = 12.46 * pitch
+                yaw_acc = 9.11 * yaw
+                roll_acc = 38.34 * roll
+
+                ang_acc += np.array([pitch_acc, yaw_acc, roll_acc])
+
+        # Jump
+        if player.on_ground or player.has_flip or player.has_jump:
+            total_diff += (true_action[5] - alt_action[5]) ** 2
+
+        # Boost
+        if player.boost_amount > 0:
+            total_diff += (true_action[6] - alt_action[6]) ** 2
+
+        # Handbrake
+        if player.on_ground:
+            is_still = (true_action[0] == alt_action[0] == 0) and (player.car_data.linear_velocity == 0).all()
+            if not is_still:
+                total_diff += (true_action[7] - alt_action[7]) ** 2
+
+    return np.sqrt(total_diff) <= threshold
 
 
 def get_data(states: List["GameState"], actions: np.ndarray, action_options: int = 16):
@@ -211,14 +340,30 @@ def get_data(states: List["GameState"], actions: np.ndarray, action_options: int
                     if not equivalent(player, action, act, 0.25):
                         break
                 mutated_actions[k] = act
+            random_actions_noneq = np.zeros((action_options, 8))
+            for k in range(action_options):
+                while True:
+                    act = random_action()
+                    if not equivalent(player, action, act, 0.25):
+                        break
+                random_actions_noneq[k] = act
+            mutated_actions_noneq = np.zeros((action_options, 8))
+            for k in range(action_options):
+                while True:
+                    act = mutate_action(action)
+                    if not equivalent(player, action, act, 0.25):
+                        break
+                mutated_actions_noneq[k] = act
 
             x_data[j] = features
             y_data[0][j] = action
             y_data[1][j] = random_actions
             y_data[2][j] = mutated_actions
-            y_data[3][j] = player.on_ground
-            y_data[4][j] = player.has_jump
-            y_data[5][j] = player.has_flip
+            y_data[3][j] = random_actions_noneq
+            y_data[4][j] = mutated_actions_noneq
+            y_data[5][j] = player.on_ground
+            y_data[6][j] = player.has_jump
+            y_data[7][j] = player.has_flip
             j += 1
 
         # Cut off invalid data
