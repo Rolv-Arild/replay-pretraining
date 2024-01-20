@@ -110,4 +110,3 @@ if __name__ == '__main__':
         output_folder=args.output_folder,
         lut_granularity=args.lut_granularity
     )
-

@@ -67,7 +67,7 @@ def train_idm(dataset_location, mutate_train_actions, ff_dim, hidden_layers, dro
     model.cuda()
     print(f"Model has {sum(p.numel() for p in model.parameters() if p.requires_grad)} parameters")
 
-    lr_decay = 0.5 ** (1 / lr_half_life)
+    lr_decay = 0.5 ** (batch_size / lr_half_life)
     optimizer = torch.optim.AdamW(model.parameters(), lr)
     loss_fn = nn.CrossEntropyLoss(reduce=False)
     scheduler = ExponentialLR(optimizer, lr_decay)
