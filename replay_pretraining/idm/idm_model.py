@@ -21,7 +21,7 @@ class IDMNet(nn.Module):
         self.lin0 = nn.Linear(77 * 16, ff_dim)
         self.dropout0 = nn.Dropout(dropout_rate)
         self.hidden_layers = nn.ModuleList([nn.Linear(ff_dim, ff_dim) for _ in range(hidden_layers)])
-        self.dropouts = [nn.Dropout(dropout_rate) for _ in range(hidden_layers)]
+        self.dropouts = nn.ModuleList([nn.Dropout(dropout_rate) for _ in range(hidden_layers)])
 
         self.action_out = ControlsPredictorDot(ff_dim, ff_dim, ff_dim // 16, 2)
         self.on_ground_out = nn.Linear(ff_dim, 2)
