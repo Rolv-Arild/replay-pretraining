@@ -15,28 +15,38 @@ BUTTONS = ['throttle', 'steer', 'pitch', 'yaw', 'roll', 'jump', 'boost', 'handbr
 
 
 class ReplaySetter(StateSetter):
-    def __init__(self, replay_paths: list, random_frames=False):
+    def __init__(self, replay_paths: list, random_frames=True):
         super().__init__()
         self.replay_paths = replay_paths
         self.action_sequence = None
         self.random_frames = random_frames
 
         file_segment_pairs = []
-        for replay in replay_paths:
+        for replay in replay_paths[:10]:
             for gameplay_segment in os.listdir(replay):
                 gamestates = pd.read_parquet(os.path.join(replay, gameplay_segment, "gamestates.parquet"))
+                gamestates = [GameState(row.tolist()) for row in gamestates.fillna(0.).replace(np.inf, 300).values]
                 idm_actions = pd.read_parquet(os.path.join(replay, gameplay_segment, "idm_actions.parquet"))
                 file_segment_pairs.append((os.path.basename(replay), gameplay_segment, gamestates, idm_actions))
         self.file_segment_pairs = file_segment_pairs
+        self.pair_idx = None
+        self.state_idx = None
 
     def reset(self, state_wrapper: StateWrapper):
-        replay, gameplay_segment, gamestates, idm_actions = random.choice(self.file_segment_pairs)
-        gamestates = [GameState(row.tolist()) for row in gamestates.values]
-        idx = 0
-        if self.random_frames:
-            idx = random.randrange(len(gamestates))
-            gamestates = gamestates[idx:]
-            idm_actions = idm_actions.iloc[idx:]
+        if self.pair_idx is None:
+            self.pair_idx = 0
+            self.state_idx = 0
+        replay, gameplay_segment, gamestates, actions = self.file_segment_pairs[self.pair_idx]
+
+        if self.state_idx >= len(gamestates):
+            self.pair_idx = (self.pair_idx + 1) % len(self.file_segment_pairs)
+            replay, gameplay_segment, gamestates, actions = self.file_segment_pairs[self.pair_idx]
+            self.state_idx = 0
+
+        # gamestates = [GameState(row.tolist()) for row in gamestates.values]
+        idx = self.state_idx
+        gamestates = gamestates[idx:]
+        actions = actions.iloc[idx:]
 
         print(f"State is from replay {replay}, segment {gameplay_segment}, at timestep {idx}")
 
@@ -52,17 +62,18 @@ class ReplaySetter(StateSetter):
             else:
                 player.car_id = StateWrapper.ORANGE_ID1 + o
                 o += 1
-            self.action_sequence[:, i] = idm_actions[[f"{car_id}/{b}" for b in BUTTONS]].values
+            self.action_sequence[:, i] = actions[[f"{car_id}/{b}" for b in BUTTONS]].values
         state_wrapper._read_from_gamestate(gamestate)  # noqa
+        self.state_idx += 30
 
 
 def main():
-    base_folder = r"E:\rokutleg\labeled\drawn-sun-355"
+    base_folder = r"D:\rokutleg\behavioral-cloning\labeled\2v2"
     replays = os.listdir(base_folder)
     replays = [os.path.join(base_folder, replay) for replay in replays]
     setter = ReplaySetter(replays)
     env = rlgym.make(game_speed=1, spawn_opponents=True, team_size=3, state_setter=setter, tick_skip=4,
-                     terminal_conditions=[TimeoutCondition(30 * 3), GoalScoredCondition()])
+                     terminal_conditions=[TimeoutCondition(30), GoalScoredCondition()])
 
     while True:
         env.reset()

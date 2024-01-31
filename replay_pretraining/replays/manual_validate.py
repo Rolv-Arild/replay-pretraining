@@ -1,6 +1,5 @@
-import json
-
 import numpy as np
+import pandas as pd
 
 from replay_pretraining.replays.label_replays import ReplayLabeler
 from replay_pretraining.replays.replays import load_parsed_replay
@@ -40,13 +39,30 @@ if __name__ == '__main__':
     # model = torch.jit.load("idm-model.pt").cuda()
     # manual_validate()
 
-    with open("test_replays/2024.1.13-1.17.38.json") as f:
-        actions_dict = json.load(f)
-    true_actions = np.array([convert_input_map(a["playerInputsMap"][0]["inputs"]) for a in actions_dict])
-    replay = load_parsed_replay("./test_replays/2024.1.13-1.17.38")
+    # with open("test_replays/2024.1.13-1.17.38.json") as f:
+    #     actions_dict = json.load(f)
+    # true_actions = np.array([convert_input_map(a["playerInputsMap"][0]["inputs"]) for a in actions_dict])
+    # replay = load_parsed_replay("./test_replays/2024.1.13-1.17.38")
+
+    true_actions = pd.read_csv("test_replays/2FC5F2B741BE14E25DBB0C88E3B73B82.csv", sep=";")
+
+    replay = load_parsed_replay("./test_replays/2FC5F2B741BE14E25DBB0C88E3B73B82/")
+
+    # Convert to seconds
+    true_actions["time"] /= 1e7
+
+    # Actions are not saved if they are the same as the previous frame, so we need to fill in the gaps
+    true_actions = true_actions.reindex(np.arange(0, true_actions["time"].max(), 1 / 120))
+    true_actions = true_actions.interpolate(method="pad")
+
+    # Sync up to replay using
+    start_frame = replay.analyzer["gameplay_periods"][0]["start_frame"]
+    start_time = replay.game.loc[start_frame, "time"]
+    true_actions["time"] -= start_time
+
     labeler = ReplayLabeler("models/idm-model-dainty-durian-356.pt", 2)
 
-    for df, actions in labeler.label_replay(replay):
+    for df, controls_df, actions in labeler.label_replay(replay):
         debug = True
 
     # make_bc_dataset(r"D:\rokutleg\parsed\2021-electrum-replays\ranked-doubles",
