@@ -318,22 +318,20 @@ def get_actions_from_player(player_df, deltas, lookup_table=None):
     ratings_grounded -= boost_diff
     ratings_aerial -= boost_diff
 
-    # Match throttle, steer and handbrake for grounded actions. Hard to quantify relative importance of each so just
+    # Match throttle, steer and handbrake for grounded actions. Hard to quantify importance of each so just use binary
     mask = ~pressing_jump
     throttle = throttle.values
     steer = steer.values
     handbrake = handbrake.values
     tsh = np.stack([throttle, steer, handbrake], axis=-1)
-    tsh[mask & boost, 0] = np.nan  # Don't count throttle when boosting
-    ratings_grounded[mask] -= np.nanmax(np.abs(actions[mask, :, [0, 1, 7]]
-                                               - tsh[mask].reshape(-1, 1, 3)), axis=-1)
+    tsh[mask & (boost > 0), 0] = np.nan  # Don't count throttle when boosting
+    ratings_grounded[mask] -= np.sum(np.abs(actions[mask][:, :, [0, 1, 7]]
+                                            - tsh[mask].reshape(-1, 1, 3)) > 0.5)
 
     # For aerial actions, match pitch, yaw, and roll
     mask = ((~pressing_jump & (dodge_active.values <= 0))  # Don't apply while jumping or dodging
             | (jm & (jumping.diff().values == 0)))  # Except for held down jump button
     ratings_aerial[mask] -= np.linalg.norm(actions[mask, :, 2:5] - pyr[mask].reshape(-1, 1, 3), axis=-1)
-
-    assert np.all(ratings_grounded[dm])
 
     return controls_df, np.stack([ratings_jumps, ratings_grounded, ratings_aerial])
 

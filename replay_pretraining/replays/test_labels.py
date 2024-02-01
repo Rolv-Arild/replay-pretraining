@@ -26,7 +26,7 @@ class ReplaySetter(StateSetter):
             for gameplay_segment in os.listdir(replay):
                 gamestates = pd.read_parquet(os.path.join(replay, gameplay_segment, "gamestates.parquet"))
                 gamestates = [GameState(row.tolist()) for row in gamestates.fillna(0.).replace(np.inf, 300).values]
-                idm_actions = pd.read_parquet(os.path.join(replay, gameplay_segment, "idm_actions.parquet"))
+                idm_actions = pd.read_parquet(os.path.join(replay, gameplay_segment, "replay_actions.parquet"))
                 file_segment_pairs.append((os.path.basename(replay), gameplay_segment, gamestates, idm_actions))
         self.file_segment_pairs = file_segment_pairs
         self.pair_idx = None

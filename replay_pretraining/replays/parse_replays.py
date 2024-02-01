@@ -13,7 +13,7 @@ ENV["NO_COLOR"] = "1"
 def process_replay(replay_path, output_folder, skip_existing=True):
     folder, fn = os.path.split(replay_path)
     replay_name = fn.replace(".replay", "")
-    processed_folder = os.path.join(output_folder, replay_name)
+    processed_folder = os.path.join(output_folder, replay_name[0], replay_name)
     if os.path.isdir(processed_folder) and len(os.listdir(processed_folder)) > 0:
         if skip_existing:
             return
