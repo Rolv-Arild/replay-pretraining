@@ -121,6 +121,8 @@ def to_rlgym_dfs(parsed_replay: Replay, lookup_table=None):
         player_metas = sorted(parsed_replay.metadata["players"], key=lambda x: int(x["unique_id"]))
         for player in player_metas:
             uid = player["unique_id"]
+            if uid not in players:
+                continue
             player_df = players[uid]
             df.loc[:, f"{uid}/car_id"] = int(uid)
             df.loc[:, f"{uid}/team_num"] = int(player["is_orange"])

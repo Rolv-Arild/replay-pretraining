@@ -42,7 +42,7 @@ def main():
     replay_paths = [os.path.join(dp, f)
                     for dp, dn, fn in os.walk(replay_folder)
                     for f in fn
-                    if f.endswith(".replay")]
+                    if f.endswith(".replay") and f[0] == "5"]
     it = tqdm(sorted(replay_paths), "Parsing replays")
     for replay_path in it:
         parsed_folder = os.path.dirname(replay_path.replace(args.input_folder, args.output_folder))
