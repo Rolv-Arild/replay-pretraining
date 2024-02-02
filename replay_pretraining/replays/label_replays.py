@@ -122,23 +122,27 @@ def main(model_path, parsed_replays_folder, output_folder, lut_granularity):
     it = tqdm(folders)
     for folder in it:
         try:
-            replay = load_parsed_replay(folder)
-        except FileNotFoundError:
+            try:
+                replay = load_parsed_replay(folder)
+            except FileNotFoundError:
+                continue
+            if not (25 < 1 / replay.game.delta.mean() < 35):
+                print(f"Skipping {folder} because of delta ({1 / replay.game.delta.mean()} fps)")
+                continue
+            gameplay_segment = 0
+            for gamestates_df, controls_df, idm_actions_df in labeler.label_replay(replay):
+                out_folder = folder.replace(parsed_replays_folder, output_folder)
+                out_folder = os.path.join(out_folder, f"{gameplay_segment}")
+                if os.path.exists(out_folder):
+                    shutil.rmtree(out_folder)
+                os.makedirs(out_folder)
+                gamestates_df.to_parquet(os.path.join(out_folder, "gamestates.parquet"))
+                controls_df.to_parquet(os.path.join(out_folder, "replay_actions.parquet"))
+                idm_actions_df.to_parquet(os.path.join(out_folder, "idm_actions.parquet"))
+                gameplay_segment += 1
+        except Exception as e:
+            print(f"Error in {folder}: {e}")
             continue
-        if not (25 < 1 / replay.game.delta.mean() < 35):
-            print(f"Skipping {folder} because of delta ({1 / replay.game.delta.mean()} fps)")
-            continue
-        gameplay_segment = 0
-        for gamestates_df, controls_df, idm_actions_df in labeler.label_replay(replay):
-            out_folder = folder.replace(parsed_replays_folder, output_folder)
-            out_folder = os.path.join(out_folder, f"{gameplay_segment}")
-            if os.path.exists(out_folder):
-                shutil.rmtree(out_folder)
-            os.makedirs(out_folder)
-            gamestates_df.to_parquet(os.path.join(out_folder, "gamestates.parquet"))
-            controls_df.to_parquet(os.path.join(out_folder, "replay_actions.parquet"))
-            idm_actions_df.to_parquet(os.path.join(out_folder, "idm_actions.parquet"))
-            gameplay_segment += 1
 
 
 if __name__ == '__main__':

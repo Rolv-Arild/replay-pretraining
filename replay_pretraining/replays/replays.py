@@ -248,9 +248,9 @@ def get_actions_from_player(player_df, deltas, lookup_table=None):
 
     # Double jumps
     dodge_deadzone = 0.5  # Default dodge deadzone in RLGym/RLBot
-    mag = np.linalg.norm(pyr, axis=1)
+    mag = np.abs(pyr).sum(axis=1)
     mask = double_jumping & (mag > dodge_deadzone - 0.01)
-    pyr[mask, :] = dodge_deadzone * pyr[mask, :] / mag[mask].reshape(-1, 1)
+    pyr[mask, :] = (dodge_deadzone - 0.01) * pyr[mask, :] / mag[mask].reshape(-1, 1)
 
     boost = player_df["boost_is_active"].fillna(0.)
     handbrake = player_df["handbrake"].astype(float).fillna(0.)
