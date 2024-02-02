@@ -116,12 +116,19 @@ class ReplayLabeler:
                 yield gamestates_df, replay_actions_df, idm_actions_df
 
 
-def main(model_path, parsed_replays_folder, output_folder, lut_granularity):
+def main(model_path, parsed_replays_folder, output_folder, lut_granularity, overwrite):
     labeler = ReplayLabeler(model_path, lut_granularity)
     folders = [dp for dp, dn, fn in os.walk(parsed_replays_folder) for f in fn if f == "metadata.json"]
     it = tqdm(folders)
     for folder in it:
         try:
+            out_folder = folder.replace(parsed_replays_folder, output_folder)
+            if os.path.exists(out_folder):
+                if overwrite:
+                    shutil.rmtree(out_folder)
+                else:
+                    it.set_postfix_str("Skipping")
+                    continue
             try:
                 replay = load_parsed_replay(folder)
             except FileNotFoundError:
@@ -131,14 +138,11 @@ def main(model_path, parsed_replays_folder, output_folder, lut_granularity):
                 continue
             gameplay_segment = 0
             for gamestates_df, controls_df, idm_actions_df in labeler.label_replay(replay):
-                out_folder = folder.replace(parsed_replays_folder, output_folder)
-                out_folder = os.path.join(out_folder, f"{gameplay_segment}")
-                if os.path.exists(out_folder):
-                    shutil.rmtree(out_folder)
-                os.makedirs(out_folder)
-                gamestates_df.to_parquet(os.path.join(out_folder, "gamestates.parquet"))
-                controls_df.to_parquet(os.path.join(out_folder, "replay_actions.parquet"))
-                idm_actions_df.to_parquet(os.path.join(out_folder, "idm_actions.parquet"))
+                segment_folder = os.path.join(out_folder, f"{gameplay_segment}")
+                os.makedirs(segment_folder)
+                gamestates_df.to_parquet(os.path.join(segment_folder, "gamestates.parquet"))
+                controls_df.to_parquet(os.path.join(segment_folder, "replay_actions.parquet"))
+                idm_actions_df.to_parquet(os.path.join(segment_folder, "idm_actions.parquet"))
                 gameplay_segment += 1
         except Exception as e:
             print(f"Error in {folder}: {e}")
@@ -151,11 +155,13 @@ if __name__ == '__main__':
     parser.add_argument("--parsed_replays_folder", type=str, required=True)
     parser.add_argument("--output_folder", type=str, required=True)
     parser.add_argument("--lut_granularity", type=int, default=1)
+    parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
     main(
         model_path=args.model_path,
         parsed_replays_folder=args.parsed_replays_folder,
         output_folder=args.output_folder,
-        lut_granularity=args.lut_granularity
+        lut_granularity=args.lut_granularity,
+        overwrite=args.overwrite
     )
