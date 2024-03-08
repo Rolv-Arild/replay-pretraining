@@ -42,7 +42,7 @@ You can also judge for yourself:
 
 [Imgur album](https://imgur.com/a/zqrQxcD)
 
-At this point the models have also been further trained extensively with reinforcement learning, yielding Ripple, a high level bot with many human-like traits.
+At this point the models have also been further trained extensively with reinforcement learning, yielding [Ripple](https://wandb.ai/rolv-arild/ripple/reports/Ripple--VmlldzozNDE5NzE4), a high level bot with many human-like traits.
 
 
 [^1]: We have values for throttle, steer, handbrake and boost, as well as data about jumps, double jumps, and dodges (including direction). We can infer pitch/yaw/roll using angular velocity data.
