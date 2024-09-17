@@ -44,6 +44,8 @@ You can also judge for yourself:
 
 At this point the models have also been further trained extensively with reinforcement learning, yielding [Ripple](https://wandb.ai/rolv-arild/ripple/reports/Ripple--VmlldzozNDE5NzE4), a high level bot with many human-like traits.
 
+## More
+If you're interested in more info or discussion, please feel free to join the [RLGym Discord server](https://link.rlgym.org/5qTO7b).
 
 [^1]: We have values for throttle, steer, handbrake and boost, as well as data about jumps, double jumps, and dodges (including direction). We can infer pitch/yaw/roll using angular velocity data.
 [^2]: The IDM also predicts some RLGym-specific stuff about the state that is not included in replays: `has_jump`, `has_flip` and `on_ground`
