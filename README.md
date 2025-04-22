@@ -13,7 +13,7 @@ There are a couple reasons previous attempts haven't been particularly successfu
 5. Buttons are not fully independent, e.g. jump+pitch is very different from just pitch or just jump, so a fixed set of possible actions is required for the best possible performance.
 
 In the [RLBot](https://rlbot.org/) [Botpack](https://github.com/RLBot/RLBotPack), TensorBot and Levi are actually trained on inputs/outputs of bots, 
-which works alright since we can get super-accurate inputs and consistent outputs, but then again it's doubtful that method would ever outperform the bot its trained on.
+which works alright since we can get super-accurate inputs and consistent outputs, but then again it's doubtful that method would ever outperform the bot it's trained on.
 
 
 ## Why is this different?
